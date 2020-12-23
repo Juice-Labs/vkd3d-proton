@@ -40,7 +40,8 @@ jobs:
       - name: Update environment
         run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
 
-      - run: where glslangValidator
+      - shell: cmd
+        run: where glslangValidator
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
