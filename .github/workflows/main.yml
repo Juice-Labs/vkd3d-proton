@@ -27,7 +27,8 @@ jobs:
           ./bootstrap-vcpkg.bat
           ./vcpkg integrate install
           ./vcpkg install glslang
-          dir installed/x86-windows
+          dir installed/x86-windows/tools
+          echo "%PWD%\\installed\\x86-windows\\tools" >> $GITHUB_PATH
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
