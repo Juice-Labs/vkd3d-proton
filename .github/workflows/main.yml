@@ -25,9 +25,10 @@ jobs:
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           ./bootstrap-vcpkg.bat
-          dir
           ./vcpkg integrate install
           ./vcpkg install glslang
+          dir
+          dir installed
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
