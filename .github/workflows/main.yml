@@ -48,7 +48,14 @@ jobs:
         with:
           submodules: recursive
 
+      - shell: cmd
+        run: echo %PATH%
+
       - uses: actions/setup-python@v1
+
+      - shell: cmd
+        run: echo %PATH%
+
       - uses: BSFishy/meson-build@v1.0.1
         with:
           action: build
