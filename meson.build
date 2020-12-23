@@ -2,6 +2,8 @@ project('vkd3d-proton', ['c'], version : '2.1', meson_version : '>= 0.49', defau
   'warning_level=2',
 ])
 
+message(get_env('PATH'))
+
 cpu_family = target_machine.cpu_family()
 
 vkd3d_compiler = meson.get_compiler('c')
