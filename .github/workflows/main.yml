@@ -29,18 +29,17 @@ jobs:
           ./vcpkg integrate install
           ./vcpkg install glslang
 
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
         with:
           action: build
           directory: build
 
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-        with:
-          submodules: recursive
-
       # Runs a single command using the runners shell
       - name: Build
-        shell: msys2 {0}
         run: ./package-release.sh release build --no-package
