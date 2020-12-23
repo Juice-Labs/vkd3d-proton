@@ -20,14 +20,24 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
 
+      - name: Cache vcpkg
+        uses: actions/cache@v2
+        with:
+          # npm cache files are stored in `~/.npm` on Linux/macOS
+          path: vcpkg
+          key: ${{ runner.os }}-vcpkg
+
       - name: glslang
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           ./bootstrap-vcpkg.bat
           ./vcpkg integrate install
           ./vcpkg install glslang
-          echo "%CD%\installed\x86-windows\tools" >> $GITHUB_PATH
+
+      - name: Update environment
+        run: echo "%CD%\vcpkg\installed\x86-windows\tools" >> $GITHUB_PATH
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
