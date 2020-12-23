@@ -40,22 +40,12 @@ jobs:
       - name: Update environment
         run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
 
-      - shell: cmd
-        run: where glslangValidator
-
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
         with:
           submodules: recursive
 
-      - shell: cmd
-        run: echo %PATH%
-
       - uses: actions/setup-python@v1
-
-      - shell: cmd
-        run: echo %PATH%
-
       - uses: BSFishy/meson-build@v1.0.1
         with:
           action: build
