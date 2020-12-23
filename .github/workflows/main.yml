@@ -25,6 +25,7 @@ jobs:
         uses: msys2/setup-msys2@v2
       
       - name: dir test
+        shell: cmd
         run: dir
 
       - name: Cache vcpkg
@@ -36,6 +37,7 @@ jobs:
           key: ${{ runner.os }}-vcpkg
 
       - name: dir test
+        shell: cmd
         run: dir
 
       - name: glslang
