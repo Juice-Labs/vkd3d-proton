@@ -22,13 +22,14 @@ jobs:
 
       - name: Cache vcpkg
         uses: actions/cache@v2
+        id: vcpkg_cache
         with:
           # npm cache files are stored in `~/.npm` on Linux/macOS
           path: vcpkg
           key: ${{ runner.os }}-vcpkg
 
       - name: glslang
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg_cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
