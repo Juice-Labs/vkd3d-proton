@@ -19,10 +19,6 @@ jobs:
     steps:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
-      
-      - name: dir test
-        shell: cmd
-        run: dir
 
       - name: Cache vcpkg
         uses: actions/cache@v2
@@ -31,10 +27,6 @@ jobs:
           # npm cache files are stored in `~/.npm` on Linux/macOS
           path: ./vcpkg
           key: ${{ runner.os }}-vcpkg
-
-      - name: dir test
-        shell: cmd
-        run: dir
 
       - name: glslang
         if: steps.vcpkg_cache.outputs.cache-hit != 'true'
@@ -47,22 +39,3 @@ jobs:
 
       - name: Update environment
         run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
-
-      - name: Test
-        run: |
-          glslangValidator -h
-
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-python@v1
-      - uses: BSFishy/meson-build@v1.0.1
-        with:
-          action: build
-          directory: build
-
-      # Runs a single command using the runners shell
-      - name: Build
-        run: ./package-release.sh release build --no-package
