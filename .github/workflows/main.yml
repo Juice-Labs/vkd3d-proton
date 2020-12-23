@@ -22,8 +22,11 @@ jobs:
         with:
           submodules: recursive
           
+      - name: glslang
+        run: sudo apt-get install glslang-tools
+
       - name: Wine Install
-        run: sudo apt-get install wine-stable wine64-tools glslang-tools
+        run: sudo apt-get install wine-stable wine64-tools
 
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
