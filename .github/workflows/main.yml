@@ -38,7 +38,7 @@ jobs:
           ./vcpkg install glslang
 
       - name: Update environment
-        run: echo "%CD%\vcpkg\installed\x86-windows\tools" >> $GITHUB_PATH
+        run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | (Add-Content -Path $env:GITHUB_PATH)
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
