@@ -15,27 +15,17 @@ jobs:
     # The type of runner that the job will run on
     runs-on: windows-latest
 
-    defaults:
-        run:
-          shell: msys2 {0}
-
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          install: >-
-            base-devel
-            git
 
       - name: glslang
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
-          pwd
-          ./bootstrap-vcpkg.sh
-          ls
+          ./bootstrap-vcpkg.bat
+          dir
           ./vcpkg integrate install
           ./vcpkg install glslang
 
@@ -52,4 +42,5 @@ jobs:
 
       # Runs a single command using the runners shell
       - name: Build
+        shell: msys2 {0}
         run: ./package-release.sh release build --no-package
