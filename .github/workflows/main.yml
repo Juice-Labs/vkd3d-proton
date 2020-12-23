@@ -21,6 +21,9 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: recursive
+          
+      - name: Wine Install
+        run: sudo apt-get install wine
 
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
