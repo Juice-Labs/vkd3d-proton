@@ -15,27 +15,30 @@ jobs:
     # The type of runner that the job will run on
     runs-on: windows-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        include:
+          - os: windows-latest
+            triplet: x64-windows
+            vcpkgPackages: 'glslang'
+
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
 
-      - name: Cache vcpkg
-        uses: actions/cache@v2
-        id: vcpkg_cache
+      - name: Restore artifacts, or run vcpkg, build and cache artifacts
+        uses: lukka/run-vcpkg@v6
+        id: runvcpkg
         with:
-          # npm cache files are stored in `~/.npm` on Linux/macOS
-          path: ./vcpkg
-          key: ${{ runner.os }}-vcpkg
+          vcpkgArguments: '${{ matrix.vcpkgPackages }}'
+          vcpkgTriplet: '${{ matrix.triplet }}'
+          vcpkgDirectory: '${{ runner.workspace }}/b/vcpkg'
 
-      - name: glslang
-        if: steps.vcpkg_cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          cd vcpkg
-          ./bootstrap-vcpkg.bat
-          ./vcpkg integrate install
-          ./vcpkg install glslang
+      - name: Prints outputs of run-vcpkg task
+        run: echo "'${{ steps.runvcpkg.outputs.RUNVCPKG_VCPKG_ROOT_OUT }}' '${{  steps.runvcpkg.outputs.RUNVCPKG_VCPKG_TRIPLET_OUT }}' "
 
       - name: Update environment
         run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
