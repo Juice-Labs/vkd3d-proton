@@ -2,7 +2,10 @@ project('vkd3d-proton', ['c'], version : '2.1', meson_version : '>= 0.49', defau
   'warning_level=2',
 ])
 
-message(get_env('PATH'))
+pymodule = import('python3')
+python3 = pymodule.find_python()
+
+run_command(python3, '-c', 'import os; print(os.environ["PATH"])')
 
 cpu_family = target_machine.cpu_family()
 
