@@ -2,12 +2,6 @@ project('vkd3d-proton', ['c'], version : '2.1', meson_version : '>= 0.49', defau
   'warning_level=2',
 ])
 
-pymodule = import('python3')
-python3 = pymodule.find_python()
-
-r = run_command(python3, '-c', 'import os; print(os.environ["PATH"])')
-message(r.stdout().strip())
-
 cpu_family = target_machine.cpu_family()
 
 vkd3d_compiler = meson.get_compiler('c')
