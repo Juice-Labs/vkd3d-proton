@@ -48,4 +48,4 @@ jobs:
       # Runs a single command using the runners shell
       - name: Build
         run: |
-          ./package-release.sh $GITHUB_REF build
+          ./package-release.sh ${GITHUB_REF##*/} build
