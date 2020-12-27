@@ -39,7 +39,7 @@ jobs:
           cd glslang
           git checkout 8.13.3743
           cmake .
-          cmake --build . --config Release --target install
+          sudo cmake --build . --config Release --target install
 
       # Runs a single command using the runners shell
       - name: Build
