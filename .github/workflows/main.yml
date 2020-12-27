@@ -26,6 +26,10 @@ jobs:
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
 
@@ -43,10 +47,7 @@ jobs:
       - name: Update environment
         run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
 
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-        with:
-          submodules: recursive
+      - run: glslangValidator -h
 
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
