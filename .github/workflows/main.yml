@@ -38,10 +38,8 @@ jobs:
           git clone --recursive https://github.com/KhronosGroup/glslang.git glslang
           cd glslang
           git checkout 8.13.3743
-          cmake . -DCMAKE_INSTALL_PREFIX=install
+          cmake .
           cmake --build . --config Release --target install
-          cd install/bin
-          echo $pwd >> $GITHUB_PATH
 
       # Runs a single command using the runners shell
       - name: Build
