@@ -33,6 +33,9 @@ jobs:
       - name: Setup meson
         run: pip3 install meson
 
+      - name: Setup ninja
+        run: sudo apt-get install ninja-build
+
       - name: Setup glslang
         run: |
           git clone --recursive https://github.com/KhronosGroup/glslang.git glslang
