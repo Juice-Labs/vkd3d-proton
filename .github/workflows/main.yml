@@ -48,12 +48,11 @@ jobs:
       - name: Build
         run: |
           ./package-release.sh ${GITHUB_REF##*/} build --no-package
-          tar -caf vkd3d-proton-${GITHUB_REF##*/}.tar.gz build/vkd3d-proton-${GITHUB_REF##*/}
           echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
 
       - name: Uploading artifacts
         uses: actions/upload-artifact@v2
         with:
           name: vkd3d-proton-${{ env.BRANCH_NAME }}
-          path: vkd3d-proton-${{ env.BRANCH_NAME }}.tar.gz
+          path: build/vkd3d-proton-${{ env.BRANCH_NAME }}
           if-no-files-found: error
