@@ -47,7 +47,7 @@ jobs:
       # Runs a single command using the runners shell
       - name: Build
         run: |
-          ./package-release.sh $BRANCH_NAME build
+          ./package-release.sh ${GITHUB_REF##*/} build
           echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
 
       - name: Uploading artifacts
