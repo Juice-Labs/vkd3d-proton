@@ -21,6 +21,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup python
+        uses: actions/setup-python@v1
+
+      - name: Setup meson
+        run: pip3 install meson
+
       - name: Setup glslang
         run: |
           git clone --recursive https://github.com/KhronosGroup/glslang.git glslang
@@ -29,13 +35,7 @@ jobs:
           cmake . -DCMAKE_INSTALL_PREFIX=install
           cmake --build . --config Release --target install
           cd install/bin
-          Add-Content -Path $env:GITHUB_PATH -Value $pwd
-
-      - name: Setup python
-        uses: actions/setup-python@v1
-
-      - name: Setup meson
-        run: pip3 install meson
+          echo $pwd >> $GITHUB_PATH
 
       # Runs a single command using the runners shell
       - name: Build
