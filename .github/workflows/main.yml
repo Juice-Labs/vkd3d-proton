@@ -15,15 +15,6 @@ jobs:
     # The type of runner that the job will run on
     runs-on: windows-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-        include:
-          - os: windows-latest
-            triplet: x64-windows
-            vcpkgPackages: 'glslang'
-
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       - uses: actions/checkout@v2
@@ -33,21 +24,20 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
 
-      - name: Restore artifacts, or run vcpkg, build and cache artifacts
-        uses: lukka/run-vcpkg@v6
-        id: runvcpkg
-        with:
-          vcpkgArguments: '${{ matrix.vcpkgPackages }}'
-          vcpkgTriplet: '${{ matrix.triplet }}'
-          vcpkgDirectory: '${{ runner.workspace }}/b/vcpkg'
+      - name: Setup glslang
+        run: |
+          git clone --recursive https://github.com/KhronosGroup/glslang.git glslang
+          cd glslang
+          git checkout 8.13.3743
+          cmake . -DCMAKE_INSTALL_PREFIX=install
+          cmake --build . --config Release --target install
+          cd install
+          Add-Content -Path $env:GITHUB_PATH -Value $pwd
 
-      - name: Prints outputs of run-vcpkg task
-        run: echo "'${{ steps.runvcpkg.outputs.RUNVCPKG_VCPKG_ROOT_OUT }}' '${{  steps.runvcpkg.outputs.RUNVCPKG_VCPKG_TRIPLET_OUT }}' "
-
-      - name: Update environment
-        run: (Join-Path $pwd vcpkg\installed\x86-windows\tools) | Add-Content -Path $env:GITHUB_PATH
-
-      - run: glslangValidator -h
+      - run: |
+          dir
+          dir glslang/install
+          glslangValidator -h
 
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
