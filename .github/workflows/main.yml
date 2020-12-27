@@ -23,11 +23,11 @@ jobs:
           
       - name: Setting up mingw
         run: |
-          apt-get search mingw-w64
-          sudo apt-get install mingw-w64=7.\*
+          apt search mingw-w64
+          sudo apt install mingw-w64=7.\*
 
       - name: Setting up wine
-        run: sudo apt-get install wine64 wine64-tools
+        run: sudo apt install wine64 wine64-tools
 
       - name: Setup python
         uses: actions/setup-python@v1
@@ -36,7 +36,7 @@ jobs:
         run: pip3 install meson
 
       - name: Setup ninja
-        run: sudo apt-get install ninja-build
+        run: sudo apt install ninja-build
 
       - name: Setup glslang
         run: |
