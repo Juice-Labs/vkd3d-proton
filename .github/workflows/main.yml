@@ -22,7 +22,9 @@ jobs:
           submodules: recursive
           
       - name: Setting up mingw
-        run: sudo apt-get install mingw-w64_7.0.0-4
+        run: |
+          apt-get search mingw-w64
+          sudo apt-get install mingw-w64=7.\*
 
       - name: Setting up wine
         run: sudo apt-get install wine64 wine64-tools
