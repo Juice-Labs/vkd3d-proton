@@ -53,6 +53,6 @@ jobs:
       - name: Uploading artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: build
-          path: vkd3d-proton-${{ env.BRANCH_NAME }}.tar.zst
+          name: vkd3d-proton-${{ env.BRANCH_NAME }}.tar.zst
+          path: build/vkd3d-proton-${{ env.BRANCH_NAME }}.tar.zst
           if-no-files-found: error
