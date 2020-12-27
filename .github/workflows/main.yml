@@ -24,6 +24,9 @@ jobs:
       - name: Setting up mingw
         run: sudo apt-get install mingw-w64
 
+      - name: Setting up wine
+        run: sudo apt-get install wine64-tools
+
       - name: Setup python
         uses: actions/setup-python@v1
 
