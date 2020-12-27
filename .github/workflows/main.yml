@@ -31,12 +31,10 @@ jobs:
           git checkout 8.13.3743
           cmake . -DCMAKE_INSTALL_PREFIX=install
           cmake --build . --config Release --target install
-          cd install
+          cd install/bin
           Add-Content -Path $env:GITHUB_PATH -Value $pwd
 
       - run: |
-          dir
-          dir glslang/install
           glslangValidator -h
 
       - uses: actions/setup-python@v1
