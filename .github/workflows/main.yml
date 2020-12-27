@@ -47,5 +47,10 @@ jobs:
 
       # Runs a single command using the runners shell
       - name: Build
-        run: |
-          ./package-release.sh ${GITHUB_REF##*/} build
+        run: ./package-release.sh ${GITHUB_REF##*/} build
+
+      - name: Uploading artifacts
+        uses: 'actions/upload-artifact@v2'
+        with:
+          name: build
+          path: vkd3d-proton-${GITHUB_REF##*/}.tar.zst
