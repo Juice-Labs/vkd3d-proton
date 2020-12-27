@@ -48,5 +48,4 @@ jobs:
       # Runs a single command using the runners shell
       - name: Build
         run: |
-          ./package-release.sh release build --no-package
-          ninja -C build.64 install
+          ./package-release.sh $GITHUB_REF build
