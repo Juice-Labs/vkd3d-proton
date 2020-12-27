@@ -34,9 +34,6 @@ jobs:
           cd install/bin
           Add-Content -Path $env:GITHUB_PATH -Value $pwd
 
-      - run: |
-          glslangValidator -h
-
       - uses: actions/setup-python@v1
       - uses: BSFishy/meson-build@v1.0.1
         with:
