@@ -13,16 +13,13 @@ jobs:
   # This workflow contains a single job called "build"
   build:
     # The type of runner that the job will run on
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       - uses: actions/checkout@v2
         with:
           submodules: recursive
-
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
 
       - name: Setup glslang
         run: |
@@ -34,12 +31,14 @@ jobs:
           cd install/bin
           Add-Content -Path $env:GITHUB_PATH -Value $pwd
 
-      - uses: actions/setup-python@v1
-      - uses: BSFishy/meson-build@v1.0.1
-        with:
-          action: build
-          directory: build
+      - name: Setup python
+        uses: actions/setup-python@v1
+
+      - name: Setup meson
+        run: pip3 install meson
 
       # Runs a single command using the runners shell
       - name: Build
-        run: ./package-release.sh release build --no-package
+        run: |
+          ./package-release.sh release build --no-package
+          ninja -C build.64 install
