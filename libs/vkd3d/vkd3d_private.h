@@ -2544,6 +2544,17 @@ struct vkd3d_queue_family_info
     VkQueueFlags vk_queue_flags;
 };
 
+/* ID3D12LifetimeTracker */
+typedef ID3D12LifetimeTracker d3d12_lifetime_tracker_iface;
+
+struct d3d12_lifetime_tracker
+{
+    d3d12_lifetime_tracker_iface ID3D12LifetimeTracker_iface;
+    LONG refcount;
+
+    ID3D12LifetimeOwner* owner;
+};
+
 /* ID3D12Device */
 typedef ID3D12Device6 d3d12_device_iface;
 
