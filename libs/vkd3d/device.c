@@ -2470,6 +2470,78 @@ void d3d12_device_return_query_pool(struct d3d12_device *device, const struct vk
     }
 }
 
+
+/* ID3D12LifetimeTracker */
+static inline struct d3d12_lifetime_tracker* impl_from_ID3D12LifetimeTracker(d3d12_lifetime_tracker_iface* iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d12_lifetime_tracker, ID3D12LifetimeTracker_iface);
+}
+
+static inline HRESULT d3d12_lifetime_tracker_QueryInterface(d3d12_lifetime_tracker_iface* iface, REFIID riid, void** object)
+{
+    TRACE("iface %p, riid %s, object %p.\n", iface, debugstr_guid(riid), object);
+
+    if (IsEqualGUID(riid, &IID_ID3D12LifetimeTracker)
+        || IsEqualGUID(riid, &IID_IUnknown))
+    {
+        ID3D12LifetimeTracker_AddRef(iface);
+        *object = iface;
+        return S_OK;
+    }
+
+    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
+
+    *object = NULL;
+    return E_NOINTERFACE;
+}
+
+static inline ULONG d3d12_lifetime_tracker_AddRef(d3d12_lifetime_tracker_iface* iface)
+{
+    struct d3d12_lifetime_tracker* tracker = impl_from_ID3D12LifetimeTracker(iface);
+    ULONG refcount = InterlockedIncrement(&tracker->refcount);
+
+    TRACE("%p increasing refcount to %u.\n", tracker, refcount);
+
+    return refcount;
+}
+
+static void d3d12_lifetime_tracker_destroy(struct d3d12_lifetime_tracker* tracker)
+{
+}
+
+static inline ULONG d3d12_lifetime_tracker_Release(d3d12_lifetime_tracker_iface* iface)
+{
+    struct d3d12_lifetime_tracker* tracker = impl_from_ID3D12LifetimeTracker(iface);
+    ULONG refcount = InterlockedDecrement(&tracker->refcount);
+
+    TRACE("%p decreasing refcount to %u.\n", tracker, refcount);
+
+    if (!refcount)
+    {
+        d3d12_lifetime_tracker_destroy(tracker);
+        vkd3d_free(tracker);
+    }
+
+    return refcount;
+}
+
+static inline HRESULT d3d12_lifetime_tracker_DestroyOwnedObject(d3d12_lifetime_tracker_iface* iface, ID3D12DeviceChild* pObject)
+{
+    TRACE("%p: object %p\n", iface, pObject);
+
+    return S_OK;
+}
+
+static CONST_VTBL struct ID3D12LifetimeTrackerVtbl d3d12_lifetime_tracker_vtbl =
+{
+    /* IUnknown methods */
+    d3d12_lifetime_tracker_QueryInterface,
+    d3d12_lifetime_tracker_AddRef,
+    d3d12_lifetime_tracker_Release,
+    /* ID3D12LifetimeTracker methods */
+    d3d12_lifetime_tracker_DestroyOwnedObject
+};
+
 /* ID3D12Device */
 static inline struct d3d12_device *impl_from_ID3D12Device(d3d12_device_iface *iface)
 {
@@ -4335,10 +4407,28 @@ invalid:
 static HRESULT STDMETHODCALLTYPE d3d12_device_CreateLifetimeTracker(d3d12_device_iface *iface,
         ID3D12LifetimeOwner *owner, REFIID iid, void **tracker)
 {
-    FIXME("iface %p, owner %p, iid %s, tracker %p stub!\n",
+    struct d3d12_lifetime_tracker* object;
+
+    TRACE("iface %p, owner %p, iid %s, tracker %p\n",
             iface, owner, debugstr_guid(iid), tracker);
 
-    return E_NOTIMPL;
+    if (!(object = vkd3d_malloc(sizeof(*object))))
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    object->ID3D12LifetimeTracker_iface.lpVtbl = &d3d12_lifetime_tracker_vtbl;
+    object->refcount = 0;
+    object->owner = owner;
+
+    HRESULT hr = ID3D12LifetimeTracker_QueryInterface(&object->ID3D12LifetimeTracker_iface, iid, tracker);
+    if (FAILED(hr))
+    {
+        d3d12_lifetime_tracker_destroy(object);
+        vkd3d_free(object);
+    }
+
+    return hr;
 }
 
 static void STDMETHODCALLTYPE d3d12_device_RemoveDevice(d3d12_device_iface *iface)
