@@ -2567,6 +2567,12 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_QueryInterface(d3d12_device_iface 
         *object = iface;
         return S_OK;
     }
+    else if (IsEqualGUID(riid, &IID_ID3D12CompatibilityDevice))
+    {
+        struct d3d12_device* device = impl_from_ID3D12Device(iface);
+        *object = &device->ID3D12CompatibilityDevice_iface;
+        return S_OK;
+    }
 
     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
 
@@ -3068,7 +3074,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
                             | D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON;
             }
             if (image_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
-                data->Support1 |= D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET;
+                data->Support1 |= D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET | D3D12_FORMAT_SUPPORT1_DISPLAY;
             if (image_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
                 data->Support1 |= D3D12_FORMAT_SUPPORT1_BLENDABLE;
             if (image_features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
@@ -4581,6 +4587,70 @@ static CONST_VTBL struct ID3D12Device6Vtbl d3d12_device_vtbl =
     d3d12_device_SetBackgroundProcessingMode,
 };
 
+/* ID3D12CompatibilityDevice */
+static inline struct d3d12_device* impl_from_ID3D12CompatibilityDevice(d3d12_compat_device_iface* iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d12_device, ID3D12CompatibilityDevice_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d12_compat_device_QueryInterface(d3d12_compat_device_iface* iface,
+    REFIID riid, void** object)
+{
+    struct d3d12_device* device = impl_from_ID3D12CompatibilityDevice(iface);
+    return d3d12_device_QueryInterface(&device->ID3D12Device_iface, riid, object);
+}
+
+static ULONG STDMETHODCALLTYPE d3d12_compat_device_AddRef(d3d12_compat_device_iface* iface)
+{
+    struct d3d12_device* device = impl_from_ID3D12CompatibilityDevice(iface);
+    return d3d12_device_AddRef(&device->ID3D12Device_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d3d12_compat_device_Release(d3d12_compat_device_iface* iface)
+{
+    struct d3d12_device* device = impl_from_ID3D12CompatibilityDevice(iface);
+    return d3d12_device_Release(&device->ID3D12Device_iface);
+}
+
+static HRESULT d3d12_compat_device_CreateSharedResource(d3d12_compat_device_iface* iface, 
+    const D3D12_HEAP_PROPERTIES* heap_properties, D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC* desc,
+    D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE* optimized_clear_value, const D3D11_RESOURCE_FLAGS* resFlags,
+    D3D12_COMPATIBILITY_SHARED_FLAGS flags, ID3D12LifetimeTracker* lifetimeTracker, ID3D12SwapChainAssistant* assistant,
+    REFIID iid, void** resource)
+{
+    //FIXME("d3d12_compat_device_CreateSharedResource not implemented!");
+    //return E_NOTIMPL;
+    struct d3d12_device* device = impl_from_ID3D12CompatibilityDevice(iface);
+    return d3d12_device_CreateCommittedResource(&device->ID3D12Device_iface, heap_properties, heap_flags, desc, initial_state, optimized_clear_value, iid, resource);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d12_compat_device_CreateSharedHeap(d3d12_compat_device_iface* iface,
+    D3D12_HEAP_DESC const* desc, D3D12_COMPATIBILITY_SHARED_FLAGS flags, REFIID riid, void** object)
+{
+    FIXME("d3d12_compat_device_CreateSharedHeap not implemented!");
+    return E_NOTIMPL;
+}
+
+static HRESULT d3d12_compat_device_ReflectSharedProperties(d3d12_compat_device_iface* iface, 
+    ID3D12Object* object, D3D12_REFLECT_SHARED_PROPERTY prop, void* _unknown, unsigned int _unknown1)
+{
+    FIXME("d3d12_compat_device_ReflectSharedProperties not implemented!");
+    return E_NOTIMPL;
+}
+
+static CONST_VTBL struct ID3D12CompatibilityDeviceVtbl d3d12_compat_device_vtbl =
+{
+    /* IUnknown methods */
+    d3d12_compat_device_QueryInterface,
+    d3d12_compat_device_AddRef,
+    d3d12_compat_device_Release,
+    /* ID3D12CompatibilityDevice methods */
+    d3d12_compat_device_CreateSharedResource,
+    d3d12_compat_device_CreateSharedHeap,
+    d3d12_compat_device_ReflectSharedProperties
+
+};
+
 #ifdef VKD3D_ENABLE_PROFILING
 #include "device_profiled.h"
 #endif
@@ -4995,6 +5065,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
 #else
     device->ID3D12Device_iface.lpVtbl = &d3d12_device_vtbl;
 #endif
+    device->ID3D12CompatibilityDevice_iface.lpVtbl = &d3d12_compat_device_vtbl;
 
     device->refcount = 1;
 

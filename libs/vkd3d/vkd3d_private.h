@@ -2115,10 +2115,12 @@ struct d3d12_lifetime_tracker
 
 /* ID3D12Device */
 typedef ID3D12Device6 d3d12_device_iface;
+typedef ID3D12CompatibilityDevice d3d12_compat_device_iface;
 
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
+    d3d12_compat_device_iface ID3D12CompatibilityDevice_iface;
     LONG refcount;
 
     VkDevice vk_device;
