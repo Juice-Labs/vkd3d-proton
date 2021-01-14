@@ -3867,6 +3867,8 @@ static void d3d12_command_list_update_root_descriptors(struct d3d12_command_list
     unsigned int va_count = 0;
     uint64_t dirty_push_mask;
 
+    memset(descriptor_writes, 0, sizeof(descriptor_writes));
+
     if (root_signature->flags & VKD3D_ROOT_SIGNATURE_USE_ROOT_DESCRIPTOR_SET)
     {
         /* Ensure that we populate all descriptors if push descriptors cannot be used */
