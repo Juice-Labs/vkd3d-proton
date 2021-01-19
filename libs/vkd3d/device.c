@@ -462,7 +462,8 @@ static void vkd3d_instance_apply_application_workarounds(void)
     if (!vkd3d_get_program_name(app))
         return;
 
-    for (i = 0; i < ARRAY_SIZE(application_override); i++)
+    // TODO: Uncomment when an application override is added
+    /*for (i = 0; i < ARRAY_SIZE(application_override); i++)
     {
         if (application_override[i].name && !strcmp(app, application_override[i].name))
         {
@@ -472,7 +473,7 @@ static void vkd3d_instance_apply_application_workarounds(void)
                  app, application_override[i].global_flags_add, application_override[i].global_flags_remove);
             break;
         }
-    }
+    }*/
 }
 
 static const struct vkd3d_debug_option vkd3d_config_options[] =
