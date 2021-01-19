@@ -428,9 +428,11 @@ struct vkd3d_instance_application_meta
     uint64_t global_flags_add;
     uint64_t global_flags_remove;
 };
-static const struct vkd3d_instance_application_meta application_override[] = {
-
-};
+// TODO: Uncomment when an application override is added
+// NOTE: vs2019: an empty initializer is invalid for an array with unspecified bound
+//static const struct vkd3d_instance_application_meta application_override[] = {
+//
+//};
 
 static void vkd3d_instance_apply_application_workarounds(const char *app, uint64_t *flags)
 {
@@ -438,7 +440,8 @@ static void vkd3d_instance_apply_application_workarounds(const char *app, uint64
     if (!app)
         return;
 
-    for (i = 0; i < ARRAY_SIZE(application_override); i++)
+    // TODO: Uncomment when an application override is added
+    /*for (i = 0; i < ARRAY_SIZE(application_override); i++)
     {
         if (!strcmp(app, application_override[i].name))
         {
@@ -448,7 +451,7 @@ static void vkd3d_instance_apply_application_workarounds(const char *app, uint64
                  app, application_override[i].global_flags_add, application_override[i].global_flags_remove);
             break;
         }
-    }
+    }*/
 }
 
 static HRESULT vkd3d_instance_init(struct vkd3d_instance *instance,
