@@ -6387,7 +6387,7 @@ static void d3d12_command_list_set_push_descriptor_info(struct d3d12_command_lis
         {
             descriptor->info.buffer.buffer = VK_NULL_HANDLE;
             descriptor->info.buffer.offset = 0;
-            descriptor->info.buffer.range = 0;
+            descriptor->info.buffer.range = VK_WHOLE_SIZE;
         }
         else
         {
