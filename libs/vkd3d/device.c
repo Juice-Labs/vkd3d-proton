@@ -4735,9 +4735,9 @@ static void d3d12_device_caps_init_feature_options(struct d3d12_device *device)
             features->shaderStorageImageExtendedFormats &&
             features->shaderStorageImageReadWithoutFormat;
     /* Requires VK_EXT_fragment_shader_interlock */
-    options->ROVsSupported = FALSE;
+    options->ROVsSupported = TRUE;
     /* Requires VK_EXT_conservative_rasterization */
-    options->ConservativeRasterizationTier = D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
+    options->ConservativeRasterizationTier = D3D12_CONSERVATIVE_RASTERIZATION_TIER_1;
     options->MaxGPUVirtualAddressBitsPerResource = 40; /* XXX */
     options->StandardSwizzle64KBSupported = FALSE;
     options->CrossNodeSharingTier = D3D12_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED;
