@@ -48,7 +48,8 @@ VKD3D_EXPORT HRESULT vkd3d_create_device(const struct vkd3d_device_create_info *
         return E_INVALIDARG;
     }
 
-    if (create_info->minimum_feature_level < D3D_FEATURE_LEVEL_11_0
+    // Support for D3D Core 1.0
+    if ((create_info->minimum_feature_level < D3D_FEATURE_LEVEL_11_0 && create_info->minimum_feature_level > D3D_FEATURE_LEVEL_1_0_CORE)
             || !is_valid_feature_level(create_info->minimum_feature_level))
     {
         WARN("Invalid feature level %#x.\n", create_info->minimum_feature_level);
