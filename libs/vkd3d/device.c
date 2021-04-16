@@ -2382,7 +2382,7 @@ static inline struct d3d12_lifetime_tracker* impl_from_ID3D12LifetimeTracker(d3d
     return CONTAINING_RECORD(iface, struct d3d12_lifetime_tracker, ID3D12LifetimeTracker_iface);
 }
 
-static inline HRESULT d3d12_lifetime_tracker_QueryInterface(d3d12_lifetime_tracker_iface* iface, REFIID riid, void** object)
+static inline HRESULT STDMETHODCALLTYPE d3d12_lifetime_tracker_QueryInterface(d3d12_lifetime_tracker_iface* iface, REFIID riid, void** object)
 {
     TRACE("iface %p, riid %s, object %p.\n", iface, debugstr_guid(riid), object);
 
@@ -2400,7 +2400,7 @@ static inline HRESULT d3d12_lifetime_tracker_QueryInterface(d3d12_lifetime_track
     return E_NOINTERFACE;
 }
 
-static inline ULONG d3d12_lifetime_tracker_AddRef(d3d12_lifetime_tracker_iface* iface)
+static inline ULONG STDMETHODCALLTYPE d3d12_lifetime_tracker_AddRef(d3d12_lifetime_tracker_iface* iface)
 {
     struct d3d12_lifetime_tracker* tracker = impl_from_ID3D12LifetimeTracker(iface);
     ULONG refcount = InterlockedIncrement(&tracker->refcount);
@@ -2414,7 +2414,7 @@ static void d3d12_lifetime_tracker_destroy(struct d3d12_lifetime_tracker* tracke
 {
 }
 
-static inline ULONG d3d12_lifetime_tracker_Release(d3d12_lifetime_tracker_iface* iface)
+static inline ULONG STDMETHODCALLTYPE d3d12_lifetime_tracker_Release(d3d12_lifetime_tracker_iface* iface)
 {
     struct d3d12_lifetime_tracker* tracker = impl_from_ID3D12LifetimeTracker(iface);
     ULONG refcount = InterlockedDecrement(&tracker->refcount);
@@ -2430,7 +2430,7 @@ static inline ULONG d3d12_lifetime_tracker_Release(d3d12_lifetime_tracker_iface*
     return refcount;
 }
 
-static inline HRESULT d3d12_lifetime_tracker_DestroyOwnedObject(d3d12_lifetime_tracker_iface* iface, ID3D12DeviceChild* pObject)
+static inline HRESULT STDMETHODCALLTYPE d3d12_lifetime_tracker_DestroyOwnedObject(d3d12_lifetime_tracker_iface* iface, ID3D12DeviceChild* pObject)
 {
     TRACE("%p: object %p\n", iface, pObject);
 
@@ -4598,7 +4598,7 @@ static ULONG STDMETHODCALLTYPE d3d12_compat_device_Release(d3d12_compat_device_i
     return d3d12_device_Release(&device->ID3D12Device_iface);
 }
 
-static HRESULT d3d12_compat_device_CreateSharedResource(d3d12_compat_device_iface* iface, 
+static HRESULT STDMETHODCALLTYPE d3d12_compat_device_CreateSharedResource(d3d12_compat_device_iface* iface, 
     const D3D12_HEAP_PROPERTIES* heap_properties, D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC* desc,
     D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE* optimized_clear_value, const D3D11_RESOURCE_FLAGS* resFlags,
     D3D12_COMPATIBILITY_SHARED_FLAGS flags, ID3D12LifetimeTracker* lifetimeTracker, ID3D12SwapChainAssistant* assistant,
@@ -4617,7 +4617,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_compat_device_CreateSharedHeap(d3d12_comp
     return E_NOTIMPL;
 }
 
-static HRESULT d3d12_compat_device_ReflectSharedProperties(d3d12_compat_device_iface* iface, 
+static HRESULT STDMETHODCALLTYPE d3d12_compat_device_ReflectSharedProperties(d3d12_compat_device_iface* iface, 
     ID3D12Object* object, D3D12_REFLECT_SHARED_PROPERTY prop, void* _unknown, unsigned int _unknown1)
 {
     FIXME("d3d12_compat_device_ReflectSharedProperties not implemented!");
