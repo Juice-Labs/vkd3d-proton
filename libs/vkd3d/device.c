@@ -2336,7 +2336,7 @@ static void d3d12_device_destroy_query_pool(struct d3d12_device *device, const s
     VK_CALL(vkDestroyQueryPool(device->vk_device, pool->vk_query_pool, NULL));
 }
 
-HRESULT d3d12_device_get_query_pool(struct d3d12_device *device, uint32_t type_index, struct vkd3d_query_pool *pool)
+HRESULT d3d12_device_get_query_pool(struct d3d12_device *device, D3D12_QUERY_HEAP_TYPE type_index, struct vkd3d_query_pool *pool)
 {
     size_t i;
 
