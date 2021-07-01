@@ -2267,7 +2267,7 @@ static HRESULT create_shader_stage(struct d3d12_device * device, struct d3d12_pi
     shader_desc.codeSize = spirv->size;
     shader_desc.pCode = spirv->code;
 
-    if (spirv.meta.uses_subgroup_size && device->device_info.subgroup_size_control_features.subgroupSizeControl)
+    if (spirv->meta.uses_subgroup_size && device->device_info.subgroup_size_control_features.subgroupSizeControl)
         stage_desc->flags |= VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT_EXT;
 
     vr = VK_CALL(vkCreateShaderModule(device->vk_device, &shader_desc, NULL, &stage_desc->module));
