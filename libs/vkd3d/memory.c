@@ -24,30 +24,41 @@
 static void vkd3d_memory_allocator_wait_allocation(struct vkd3d_memory_allocator *allocator,
         struct d3d12_device *device, const struct vkd3d_memory_allocation *allocation);
 
-static uint32_t vkd3d_select_memory_types(struct d3d12_device *device, const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags)
+static HRESULT vkd3d_select_memory_types(struct d3d12_device *device,
+        const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags, uint32_t *type_mask)
 {
     const VkPhysicalDeviceMemoryProperties *memory_info = &device->memory_properties;
-    uint32_t type_mask = (1 << memory_info->memoryTypeCount) - 1;
     const struct vkd3d_memory_info_domain *domain_info;
 
     domain_info = d3d12_device_get_memory_info_domain(device, heap_properties);
 
-    if (!(heap_flags & D3D12_HEAP_FLAG_DENY_BUFFERS))
-        type_mask &= domain_info->buffer_type_mask;
-
-    if (!(heap_flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES))
-        type_mask &= domain_info->sampled_type_mask;
+    *type_mask = 0;
 
     /* Render targets are not allowed on UPLOAD and READBACK heaps */
     if (!(heap_flags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) &&
-            heap_properties->Type != D3D12_HEAP_TYPE_UPLOAD &&
-            heap_properties->Type != D3D12_HEAP_TYPE_READBACK)
-        type_mask &= domain_info->rt_ds_type_mask;
+            (heap_properties->Type == D3D12_HEAP_TYPE_UPLOAD ||
+            heap_properties->Type == D3D12_HEAP_TYPE_READBACK))
+    {
+        ERR("Render targets are not allowed on UPLOAD and READBACK heaps.\n");
+        return E_INVALIDARG;
+    }
 
-    if (!type_mask)
+    if (!(heap_flags & D3D12_HEAP_FLAG_DENY_BUFFERS))
+        *type_mask |= domain_info->buffer_type_mask;
+
+    if (!(heap_flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES))
+        *type_mask |= domain_info->sampled_type_mask;
+
+    if (!(heap_flags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES))
+        *type_mask |= domain_info->rt_ds_type_mask;
+
+    if (!(*type_mask))
+    {
         ERR("No memory type found for heap flags %#x.\n", heap_flags);
+        return E_FAIL;
+    }
 
-    return type_mask;
+    return S_OK;
 }
 
 static uint32_t vkd3d_find_memory_types_with_flags(struct d3d12_device *device, VkMemoryPropertyFlags type_flags)
@@ -502,11 +513,11 @@ static HRESULT vkd3d_memory_allocation_init(struct vkd3d_memory_allocation *allo
     /* If an allocation is a dedicated fallback allocation,
      * we must not look at heap_flags, since we might end up noping out
      * the memory types we want to allocate with. */
-    type_mask = memory_requirements.memoryTypeBits;
     if (info->flags & VKD3D_ALLOCATION_FLAG_DEDICATED)
-        type_mask &= device->memory_info.global_mask;
-    else
-        type_mask &= vkd3d_select_memory_types(device, &info->heap_properties, info->heap_flags);
+        type_mask = device->memory_info.global_mask;
+    else if (FAILED(hr = vkd3d_select_memory_types(device, &info->heap_properties, info->heap_flags, &type_mask)))
+        return hr;
+    type_mask &= memory_requirements.memoryTypeBits;
 
     /* Allocate actual backing storage */
     flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
@@ -1384,6 +1395,7 @@ HRESULT vkd3d_allocate_memory(struct d3d12_device *device, struct vkd3d_memory_a
 static bool vkd3d_heap_allocation_accept_deferred_resource_placements(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags)
 {
+    HRESULT hr;
     uint32_t type_mask;
 
     /* Normally, if a memory allocation fails, we consider it an error, but there are some exceptions
@@ -1396,7 +1408,9 @@ static bool vkd3d_heap_allocation_accept_deferred_resource_placements(struct d3d
     if (is_cpu_accessible_heap(heap_properties))
         return false;
 
-    type_mask = vkd3d_select_memory_types(device, heap_properties, heap_flags);
+    if (FAILED(hr = vkd3d_select_memory_types(device, heap_properties, heap_flags, &type_mask)))
+        return false;
+
     return device->memory_properties.memoryHeapCount > 1 &&
             !vkd3d_memory_info_type_mask_covers_multiple_memory_heaps(&device->memory_properties, type_mask);
 }

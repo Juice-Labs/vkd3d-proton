@@ -5946,7 +5946,7 @@ static uint32_t vkd3d_memory_info_find_global_mask(const struct vkd3d_memory_top
         }
     }
 
-    return ~mask;
+    return (~mask) & ((1 << device->memory_properties.memoryTypeCount) - 1);
 }
 
 static void vkd3d_memory_info_init_budgets(struct vkd3d_memory_info *info,
