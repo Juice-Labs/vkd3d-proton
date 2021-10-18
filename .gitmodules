@@ -1,6 +1,6 @@
 [submodule "subprojects/dxil-spirv"]
 	path = subprojects/dxil-spirv
-	url = https://github.com/HansKristian-Work/dxil-spirv
+	url = https://github.com/Juice-Labs/dxil-spirv.git
 [submodule "subprojects/Vulkan-Headers"]
 	path = subprojects/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers
