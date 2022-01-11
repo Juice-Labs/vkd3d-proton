@@ -1,6 +1,7 @@
 [submodule "subprojects/dxil-spirv"]
 	path = subprojects/dxil-spirv
 	url = https://github.com/Juice-Labs/dxil-spirv.git
+	branch = master-juice-fix
 [submodule "subprojects/Vulkan-Headers"]
 	path = subprojects/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers
