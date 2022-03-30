@@ -43,6 +43,18 @@ const char *vkd3d_dlerror(void)
     return dlerror();
 }
 
+bool vkd3d_get_env_var(const char* name, char value[VKD3D_PATH_MAX])
+{
+    const char* envValue = getenv(name);
+    if (envValue)
+    {
+        strncpy(value, envValue, VKD3D_PATH_MAX);
+        return true;
+    }
+
+    return false;
+}
+
 bool vkd3d_get_program_name(char program_name[VKD3D_PATH_MAX])
 {
     char *name, *p, *real_path = NULL;
@@ -98,6 +110,12 @@ int vkd3d_dlclose(vkd3d_module_t handle)
 const char *vkd3d_dlerror(void)
 {
     return "Not implemented for this platform.";
+}
+
+bool vkd3d_get_env_var(const char* name, char value[VKD3D_PATH_MAX])
+{
+    DWORD len = GetEnvironmentVariableA(name, value, VKD3D_PATH_MAX);
+    return len > 0;
 }
 
 bool vkd3d_get_program_name(char program_name[VKD3D_PATH_MAX])

@@ -20,6 +20,8 @@
 
 #include "vkd3d_shader_private.h"
 
+#include "vkd3d_platform.h"
+
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -82,12 +84,12 @@ bool vkd3d_shader_replace(vkd3d_shader_hash_t hash, const void **data, size_t *s
 {
     static bool enabled = true;
     char filename[1024];
-    const char *path;
+    char path[VKD3D_PATH_MAX];
 
     if (!enabled)
         return false;
 
-    if (!(path = getenv("VKD3D_SHADER_OVERRIDE")))
+    if (!vkd3d_get_env_var("VKD3D_SHADER_OVERRIDE", path))
     {
         enabled = false;
         return false;
@@ -101,12 +103,12 @@ bool vkd3d_shader_replace_export(vkd3d_shader_hash_t hash, const void **data, si
 {
     static bool enabled = true;
     char filename[1024];
-    const char *path;
+    char path[VKD3D_PATH_MAX];
 
     if (!enabled)
         return false;
 
-    if (!(path = getenv("VKD3D_SHADER_OVERRIDE")))
+    if (!vkd3d_get_env_var("VKD3D_SHADER_OVERRIDE", path))
     {
         enabled = false;
         return false;
@@ -119,12 +121,12 @@ bool vkd3d_shader_replace_export(vkd3d_shader_hash_t hash, const void **data, si
 void vkd3d_shader_dump_shader(vkd3d_shader_hash_t hash, const struct vkd3d_shader_code *shader, const char *ext)
 {
     static bool enabled = true;
-    const char *path;
+    char path[VKD3D_PATH_MAX];
 
     if (!enabled)
         return;
 
-    if (!(path = getenv("VKD3D_SHADER_DUMP_PATH")))
+    if (!vkd3d_get_env_var("VKD3D_SHADER_DUMP_PATH", path))
     {
         enabled = false;
         return;
@@ -136,12 +138,12 @@ void vkd3d_shader_dump_shader(vkd3d_shader_hash_t hash, const struct vkd3d_shade
 void vkd3d_shader_dump_spirv_shader(vkd3d_shader_hash_t hash, const struct vkd3d_shader_code *shader)
 {
     static bool enabled = true;
-    const char *path;
+    char path[VKD3D_PATH_MAX];
 
     if (!enabled)
         return;
 
-    if (!(path = getenv("VKD3D_SHADER_DUMP_PATH")))
+    if (!vkd3d_get_env_var("VKD3D_SHADER_DUMP_PATH", path))
     {
         enabled = false;
         return;
@@ -154,13 +156,13 @@ void vkd3d_shader_dump_spirv_shader_export(vkd3d_shader_hash_t hash, const struc
         const char *export)
 {
     static bool enabled = true;
-    const char *path;
+    char path[VKD3D_PATH_MAX];
     char tag[1024];
 
     if (!enabled)
         return;
 
-    if (!(path = getenv("VKD3D_SHADER_DUMP_PATH")))
+    if (!vkd3d_get_env_var("VKD3D_SHADER_DUMP_PATH", path))
     {
         enabled = false;
         return;

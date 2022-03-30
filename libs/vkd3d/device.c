@@ -21,6 +21,7 @@
 #include "vkd3d_private.h"
 #include "vkd3d_sonames.h"
 #include "vkd3d_descriptor_debug.h"
+#include "vkd3d_platform.h"
 
 #ifdef VKD3D_ENABLE_RENDERDOC
 #include "vkd3d_renderdoc.h"
@@ -124,9 +125,9 @@ static unsigned int get_spec_version(const VkExtensionProperties *extensions,
 
 static bool is_extension_disabled(const char *extension_name)
 {
-    const char *disabled_extensions;
+    char disabled_extensions[VKD3D_PATH_MAX];
 
-    if (!(disabled_extensions = getenv("VKD3D_DISABLE_EXTENSIONS")))
+    if (!vkd3d_get_env_var("VKD3D_DISABLE_EXTENSIONS", disabled_extensions))
         return false;
 
     return vkd3d_debug_list_has_member(disabled_extensions, extension_name);
@@ -507,9 +508,9 @@ static const struct vkd3d_debug_option vkd3d_config_options[] =
 
 static void vkd3d_config_flags_init_once(void)
 {
-    const char *config;
+    char config[VKD3D_PATH_MAX] = {};
 
-    config = getenv("VKD3D_CONFIG");
+    vkd3d_get_env_var("VKD3D_CONFIG", config);
     vkd3d_config_flags = vkd3d_parse_debug_options(config, vkd3d_config_options, ARRAY_SIZE(vkd3d_config_options));
 
     if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_SKIP_APPLICATION_WORKAROUNDS))
@@ -1808,12 +1809,12 @@ static HRESULT vkd3d_select_physical_device(struct vkd3d_instance *instance,
     VkPhysicalDeviceProperties device_properties;
     VkPhysicalDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice *physical_devices;
-    const char *filter;
+    char filter[VKD3D_PATH_MAX] = {};
     uint32_t count;
     unsigned int i;
     VkResult vr;
 
-    filter = getenv("VKD3D_FILTER_DEVICE_NAME");
+    vkd3d_get_env_var("VKD3D_FILTER_DEVICE_NAME", filter);
 
     count = 0;
     if ((vr = VK_CALL(vkEnumeratePhysicalDevices(vk_instance, &count, NULL))) < 0)
@@ -5151,7 +5152,7 @@ static void d3d12_device_caps_override(struct d3d12_device *device)
 {
     D3D_FEATURE_LEVEL fl_override = (D3D_FEATURE_LEVEL)0;
     struct d3d12_caps *caps = &device->d3d12_caps;
-    const char* fl_string;
+    char fl_string[VKD3D_PATH_MAX];
     unsigned int i;
 
     static const struct
@@ -5168,7 +5169,7 @@ static void d3d12_device_caps_override(struct d3d12_device *device)
         { "12_2", D3D_FEATURE_LEVEL_12_2 },
     };
 
-    if (!(fl_string = getenv("VKD3D_FEATURE_LEVEL")))
+    if (!vkd3d_get_env_var("VKD3D_FEATURE_LEVEL", fl_string))
         return;
 
     for (i = 0; i < ARRAY_SIZE(feature_levels); i++)
