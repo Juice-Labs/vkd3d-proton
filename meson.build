@@ -1,4 +1,4 @@
-project('vkd3d-proton', ['c'], version : '2.6', meson_version : '>= 0.49', default_options : [
+project('vkd3d-proton', ['c'], version : '2.6', meson_version : '>= 0.55', default_options : [
   'warning_level=2',
 ])
 
@@ -20,6 +20,7 @@ enable_profiling         = get_option('enable_profiling')
 enable_renderdoc         = get_option('enable_renderdoc')
 enable_descriptor_qa     = get_option('enable_descriptor_qa')
 enable_trace             = get_option('enable_trace')
+enable_tracy             = get_option('enable_tracy')
 
 if enable_d3d12 == 'auto'
   enable_d3d12 = vkd3d_platform == 'windows'
@@ -67,6 +68,10 @@ endif
 enable_breadcrumbs = enable_trace
 if enable_breadcrumbs
   add_project_arguments('-DVKD3D_ENABLE_BREADCRUMBS', language : 'c')
+endif
+
+if enable_tracy
+  add_project_arguments('-DTRACY_ENABLE', language : 'c')
 endif
 
 vkd3d_external_includes = [ './subprojects/Vulkan-Headers/include', './subprojects/SPIRV-Headers/include' ]
@@ -157,6 +162,10 @@ vkd3d_version = vcs_tag(
 
 dxil_spirv = subproject('dxil-spirv')
 dxil_spirv_dep = dxil_spirv.get_variable('dxil_spirv_dep')
+
+if enable_tracy
+  tracy_dep = dependency('tracy')
+endif
 
 subdir('include')
 subdir('libs')

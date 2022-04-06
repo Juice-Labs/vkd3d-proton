@@ -25,6 +25,31 @@
 
 #ifdef VKD3D_ENABLE_PROFILING
 
+#ifdef TRACY_ENABLE
+
+#include <TracyC.h>
+
+void ___vkd3d_set_thread_name( const char* name );
+void ___vkd3d_emit_frame_mark();
+TracyCZoneCtx ___vkd3d_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active );
+void ___vkd3d_emit_zone_end( TracyCZoneCtx ctx );
+
+#define VKD3D_PROFILE_THREAD_NAME(name) ___vkd3d_set_thread_name((name))
+#define VKD3D_PROFILE_FRAME() ___vkd3d_emit_frame_mark()
+
+void vkd3d_init_profiling(void);
+bool vkd3d_uses_profiling(void);
+
+#define VKD3D_STRINGIZE1(x) #x
+#define VKD3D_STRINGIZE(x) VKD3D_STRINGIZE1(x)
+
+#define VKD3D_REGION_DECL(name) TracyCZoneCtx _vkd3d_tracy_##name
+//#define TracyCZoneN( ctx, name, active ) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { name, __func__,  __FILE__, (uint32_t)__LINE__, 0 }; TracyCZoneCtx ctx = ___tracy_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), active );
+#define VKD3D_REGION_BEGIN(name) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { VKD3D_STRINGIZE(name), __func__,  __FILE__, (uint32_t)__LINE__, 0 }; _vkd3d_tracy_##name = ___vkd3d_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), 1 )
+#define VKD3D_REGION_END_ITERATIONS(name, iter) ___vkd3d_emit_zone_end(_vkd3d_tracy_##name)
+
+#else
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -74,6 +99,12 @@ static inline uint64_t vkd3d_profiling_get_tick_count(void)
         vkd3d_profiling_notify_work(_vkd3d_region_index_##name, _vkd3d_region_begin_tick_##name, _vkd3d_region_end_tick_##name, iter); \
     } while(0)
 
+
+#define VKD3D_PROFILE_THREAD_NAME(name) ((void)0)
+#define VKD3D_PROFILE_FRAME() ((void)0)
+
+#endif /* TRACY_ENABLE */
+
 #else
 static inline void vkd3d_init_profiling(void)
 {
@@ -81,6 +112,8 @@ static inline void vkd3d_init_profiling(void)
 #define VKD3D_REGION_DECL(name) ((void)0)
 #define VKD3D_REGION_BEGIN(name) ((void)0)
 #define VKD3D_REGION_END_ITERATIONS(name, iter) ((void)0)
+#define VKD3D_PROFILE_THREAD_NAME(name) ((void)0)
+#define VKD3D_PROFILE_FRAME() ((void)0)
 #endif /* VKD3D_ENABLE_PROFILING */
 
 #define VKD3D_REGION_END(name) VKD3D_REGION_END_ITERATIONS(name, 1)

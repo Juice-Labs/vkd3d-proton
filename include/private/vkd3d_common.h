@@ -118,7 +118,7 @@ static inline unsigned int vkd3d_bitmask_tzcnt32(uint32_t mask)
 {
 #ifdef _MSC_VER
     unsigned long result;
-    _BitScanForward(&result, mask) ? result : 32;
+    _BitScanForward(&result, mask);
     return result;
 #elif defined(__GNUC__) || defined(__clang__)
     return mask ? __builtin_ctz(mask) : 32;
