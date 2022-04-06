@@ -149,6 +149,7 @@ void *vkd3d_shader_debug_ring_thread_main(void *arg)
     ring_base = ring->mapped_ring;
     last_counter = 0;
 
+    VKD3D_PROFILE_THREAD_NAME("debug-ring");
     vkd3d_set_thread_name("debug-ring");
 
     while (is_active)
