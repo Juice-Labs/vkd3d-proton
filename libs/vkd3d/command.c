@@ -379,7 +379,6 @@ static void *vkd3d_fence_worker_main(void *arg)
     bool do_exit;
     int rc;
 
-    VKD3D_PROFILE_THREAD_NAME("vkd3d_fence");
     vkd3d_set_thread_name("vkd3d_fence");
 
     cur_fence_count = 0;
@@ -11674,7 +11673,6 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
     VKD3D_REGION_DECL(queue_signal);
     VKD3D_REGION_DECL(queue_execute);
 
-    VKD3D_PROFILE_THREAD_NAME("vkd3d_queue");
     vkd3d_set_thread_name("vkd3d_queue");
 
     if (FAILED(hr = d3d12_command_queue_transition_pool_init(&pool, queue)))

@@ -1,4 +1,4 @@
-project('vkd3d-proton', ['c'], version : '2.6', meson_version : '>= 0.55', default_options : [
+project('vkd3d-proton', ['c'], version : '2.6', meson_version : '>= 0.49', default_options : [
   'warning_level=2',
 ])
 
@@ -21,6 +21,7 @@ enable_renderdoc         = get_option('enable_renderdoc')
 enable_descriptor_qa     = get_option('enable_descriptor_qa')
 enable_trace             = get_option('enable_trace')
 enable_tracy             = get_option('enable_tracy')
+dynamic_tracy            = get_option('dynamic_tracy')
 
 if enable_d3d12 == 'auto'
   enable_d3d12 = vkd3d_platform == 'windows'
@@ -71,7 +72,12 @@ if enable_breadcrumbs
 endif
 
 if enable_tracy
+  add_project_arguments('-DVKD3D_ENABLE_PROFILING', language : 'c')
   add_project_arguments('-DTRACY_ENABLE', language : 'c')
+
+  if dynamic_tracy
+    add_project_arguments('-DDYNAMIC_TRACY', language : 'c')
+  endif
 endif
 
 vkd3d_external_includes = [ './subprojects/Vulkan-Headers/include', './subprojects/SPIRV-Headers/include' ]
@@ -164,7 +170,20 @@ dxil_spirv = subproject('dxil-spirv')
 dxil_spirv_dep = dxil_spirv.get_variable('dxil_spirv_dep')
 
 if enable_tracy
-  tracy_dep = dependency('tracy')
+  tracy_options = [
+    'tracy_on_demand=true',
+    'tracy_no_callstack=true',
+    'tracy_delayed_init=true'
+  ]
+
+  if dynamic_tracy
+    tracy_options += [
+      'tracy_shared_libs=true'
+    ]
+  endif
+
+  tracy = subproject('tracy', default_options : tracy_options)
+  tracy_dep = tracy.get_variable('tracy_dep')
 endif
 
 subdir('include')

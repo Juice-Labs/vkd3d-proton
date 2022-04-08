@@ -29,13 +29,13 @@
 
 #include <TracyC.h>
 
-void ___vkd3d_set_thread_name( const char* name );
-void ___vkd3d_emit_frame_mark();
-TracyCZoneCtx ___vkd3d_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active );
-void ___vkd3d_emit_zone_end( TracyCZoneCtx ctx );
+void tracy_set_thread_name( const char* name );
+void tracy_emit_frame_mark();
+TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active );
+void tracy_emit_zone_end( TracyCZoneCtx ctx );
 
-#define VKD3D_PROFILE_THREAD_NAME(name) ___vkd3d_set_thread_name((name))
-#define VKD3D_PROFILE_FRAME() ___vkd3d_emit_frame_mark()
+#define VKD3D_PROFILE_THREAD_NAME(name) tracy_set_thread_name((name))
+#define VKD3D_PROFILE_FRAME() tracy_emit_frame_mark()
 
 void vkd3d_init_profiling(void);
 bool vkd3d_uses_profiling(void);
@@ -45,8 +45,8 @@ bool vkd3d_uses_profiling(void);
 
 #define VKD3D_REGION_DECL(name) TracyCZoneCtx _vkd3d_tracy_##name
 //#define TracyCZoneN( ctx, name, active ) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { name, __func__,  __FILE__, (uint32_t)__LINE__, 0 }; TracyCZoneCtx ctx = ___tracy_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), active );
-#define VKD3D_REGION_BEGIN(name) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { VKD3D_STRINGIZE(name), __func__,  __FILE__, (uint32_t)__LINE__, 0 }; _vkd3d_tracy_##name = ___vkd3d_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), 1 )
-#define VKD3D_REGION_END_ITERATIONS(name, iter) ___vkd3d_emit_zone_end(_vkd3d_tracy_##name)
+#define VKD3D_REGION_BEGIN(name) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { VKD3D_STRINGIZE(name), __func__,  __FILE__, (uint32_t)__LINE__, 0 }; _vkd3d_tracy_##name = tracy_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), 1 )
+#define VKD3D_REGION_END_ITERATIONS(name, iter) tracy_emit_zone_end(_vkd3d_tracy_##name)
 
 #else
 
