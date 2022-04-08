@@ -132,6 +132,8 @@ static void vkd3d_init_profiling_once(void)
 #else
 #include "vkd3d_platform.h"
 
+#ifdef DYNAMIC_TRACY
+
 static void (*pfn_tracy_set_thread_name)( const char* name );
 static void (*pfn_tracy_emit_frame_mark)( const char* name );
 static TracyCZoneCtx (*pfn_tracy_emit_zone_begin)( const struct ___tracy_source_location_data* srcloc, int active );
@@ -154,6 +156,12 @@ static void vkd3d_init_profiling_once(void)
         pfn_tracy_emit_zone_end = vkd3d_dlsym(tracy, "___tracy_emit_zone_end");
     }
 }
+#else
+static void vkd3d_init_profiling_once(void)
+{
+}
+#endif /* DYNAMIC_TRACY */
+
 #endif /* TRACY_ENABLE */
 
 void vkd3d_init_profiling(void)
@@ -228,31 +236,57 @@ void vkd3d_profiling_notify_work(unsigned int index,
 
 #ifdef TRACY_ENABLE
 
-void ___vkd3d_set_thread_name( const char* name )
+#ifdef DYNAMIC_TRACY
+
+void tracy_set_thread_name( const char* name )
 {
     if(pfn_tracy_set_thread_name)
         pfn_tracy_set_thread_name(name);
 }
 
-void ___vkd3d_emit_frame_mark()
+void tracy_emit_frame_mark()
 {
     if(pfn_tracy_emit_frame_mark)
         pfn_tracy_emit_frame_mark(0);
 }
 
-TracyCZoneCtx ___vkd3d_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active )
+TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active )
 {
-    static TracyCZoneCtx ctx;
+    TracyCZoneCtx ctx;
     if(pfn_tracy_emit_zone_begin)
-        return pfn_tracy_emit_zone_begin(srcloc, active);
+        ctx = pfn_tracy_emit_zone_begin(srcloc, active);
     return ctx;
 }
 
-void ___vkd3d_emit_zone_end(TracyCZoneCtx ctx)
+void tracy_emit_zone_end(TracyCZoneCtx ctx)
 {
     if(pfn_tracy_emit_zone_end)
         pfn_tracy_emit_zone_end(ctx);
 }
+
+#else
+
+void tracy_set_thread_name( const char* name )
+{
+    ___tracy_set_thread_name(name);
+}
+
+void tracy_emit_frame_mark()
+{
+    ___tracy_emit_frame_mark(0);
+}
+
+TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active )
+{
+    return ___tracy_emit_zone_begin(srcloc, active);
+}
+
+void tracy_emit_zone_end(TracyCZoneCtx ctx)
+{
+    ___tracy_emit_zone_end(ctx);
+}
+
+#endif /* DYNAMIC_TRACY */
 
 #endif /* TRACY_ENABLE */
 
