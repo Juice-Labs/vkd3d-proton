@@ -172,7 +172,8 @@ if enable_tracy
   tracy_options = [
     'tracy_on_demand=true',
     'tracy_no_callstack=true',
-    'tracy_delayed_init=true'
+    'tracy_delayed_init=true',
+    'tracy_no_sys_trace=true'
   ]
 
   if dynamic_tracy
