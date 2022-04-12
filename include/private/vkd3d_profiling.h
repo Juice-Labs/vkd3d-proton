@@ -44,7 +44,8 @@ bool vkd3d_uses_profiling(void);
 #define VKD3D_STRINGIZE(x) VKD3D_STRINGIZE1(x)
 
 #define VKD3D_REGION_DECL(name) TracyCZoneCtx _vkd3d_tracy_##name
-//#define TracyCZoneN( ctx, name, active ) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { name, __func__,  __FILE__, (uint32_t)__LINE__, 0 }; TracyCZoneCtx ctx = ___tracy_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), active );
+// Copied from definition of TracyCZoneN. In this implementation, _vkd3d_tracy_##name is expected
+// to be defined by VKD3D_REGION_DECL.
 #define VKD3D_REGION_BEGIN(name) static const struct ___tracy_source_location_data TracyConcat(__tracy_source_location,__LINE__) = { VKD3D_STRINGIZE(name), __func__,  __FILE__, (uint32_t)__LINE__, 0 }; _vkd3d_tracy_##name = tracy_emit_zone_begin( &TracyConcat(__tracy_source_location,__LINE__), 1 )
 #define VKD3D_REGION_END_ITERATIONS(name, iter) tracy_emit_zone_end(_vkd3d_tracy_##name)
 

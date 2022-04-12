@@ -50,7 +50,7 @@ if enable_d3d12
   add_project_arguments('-DVKD3D_BUILD_STANDALONE_D3D12', language : 'c')
 endif
 
-if enable_profiling
+if enable_profiling or enable_tracy
   add_project_arguments('-DVKD3D_ENABLE_PROFILING', language : 'c')
 endif
 
@@ -72,7 +72,6 @@ if enable_breadcrumbs
 endif
 
 if enable_tracy
-  add_project_arguments('-DVKD3D_ENABLE_PROFILING', language : 'c')
   add_project_arguments('-DTRACY_ENABLE', language : 'c')
 
   if dynamic_tracy
@@ -80,7 +79,7 @@ if enable_tracy
   endif
 endif
 
-vkd3d_external_includes = [ './subprojects/Vulkan-Headers/include', './subprojects/SPIRV-Headers/include' ]
+vkd3d_external_includes = [ '../../common/vulkan/include', './subprojects/SPIRV-Headers/include' ]
 vkd3d_public_includes   = [ './include' ] + vkd3d_external_includes
 vkd3d_private_includes  = [ './include/private' ] + vkd3d_public_includes
 

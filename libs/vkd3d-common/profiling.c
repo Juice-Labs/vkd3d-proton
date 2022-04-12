@@ -16,7 +16,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#if defined(VKD3D_ENABLE_PROFILING)
+#ifdef VKD3D_ENABLE_PROFILING
 
 #define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
 
@@ -238,7 +238,7 @@ void vkd3d_profiling_notify_work(unsigned int index,
 
 #ifdef DYNAMIC_TRACY
 
-void tracy_set_thread_name( const char* name )
+void tracy_set_thread_name(const char *name)
 {
     if(pfn_tracy_set_thread_name)
         pfn_tracy_set_thread_name(name);
@@ -250,7 +250,7 @@ void tracy_emit_frame_mark()
         pfn_tracy_emit_frame_mark(0);
 }
 
-TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active )
+TracyCZoneCtx tracy_emit_zone_begin(const struct ___tracy_source_location_data *srcloc, int active)
 {
     TracyCZoneCtx ctx;
     if(pfn_tracy_emit_zone_begin)
@@ -266,7 +266,7 @@ void tracy_emit_zone_end(TracyCZoneCtx ctx)
 
 #else
 
-void tracy_set_thread_name( const char* name )
+void tracy_set_thread_name(const char *name)
 {
     ___tracy_set_thread_name(name);
 }
@@ -276,7 +276,7 @@ void tracy_emit_frame_mark()
     ___tracy_emit_frame_mark(0);
 }
 
-TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active )
+TracyCZoneCtx tracy_emit_zone_begin(const struct ___tracy_source_location_data *srcloc, int active)
 {
     return ___tracy_emit_zone_begin(srcloc, active);
 }
