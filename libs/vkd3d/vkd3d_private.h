@@ -927,7 +927,7 @@ HRESULT vkd3d_allocate_image_memory(struct d3d12_device *device, VkImage vk_imag
         struct vkd3d_device_memory_allocation *allocation);
 HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
-        const D3D12_RESOURCE_DESC1 *desc, VkBuffer *vk_buffer);
+        const D3D12_RESOURCE_DESC1 *desc, VkVkd3dTypeJUICE type, VkBuffer *vk_buffer);
 HRESULT vkd3d_get_image_allocation_info(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc, D3D12_RESOURCE_ALLOCATION_INFO *allocation_info);
 

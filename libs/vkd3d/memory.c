@@ -146,7 +146,7 @@ static HRESULT vkd3d_create_global_buffer(struct d3d12_device *device, VkDeviceS
             heap_properties->Type != D3D12_HEAP_TYPE_READBACK)
         resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-    return vkd3d_create_buffer(device, heap_properties, heap_flags, &resource_desc, vk_buffer);
+    return vkd3d_create_buffer(device, heap_properties, heap_flags, &resource_desc, VK_VKD3D_TYPE_GLOBAL_MEMORY_BUFFER_JUICE, vk_buffer);
 }
 
 void vkd3d_free_device_memory(struct d3d12_device *device, const struct vkd3d_device_memory_allocation *allocation)

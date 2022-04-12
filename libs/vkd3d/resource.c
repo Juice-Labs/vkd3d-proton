@@ -88,19 +88,25 @@ VkSampleCountFlagBits vk_samples_from_dxgi_sample_desc(const DXGI_SAMPLE_DESC *d
 
 HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
-        const D3D12_RESOURCE_DESC1 *desc, VkBuffer *vk_buffer)
+        const D3D12_RESOURCE_DESC1 *desc, VkVkd3dTypeJUICE type, VkBuffer *vk_buffer)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     VkExternalMemoryBufferCreateInfo external_info;
     const bool sparse_resource = !heap_properties;
     VkBufferCreateInfo buffer_info;
+    VkD3D12ResourceCreateInfoJUICE d3d12_info;
     D3D12_HEAP_TYPE heap_type;
     VkResult vr;
 
     heap_type = heap_properties ? heap_properties->Type : D3D12_HEAP_TYPE_DEFAULT;
 
+    d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
+    d3d12_info.pNext = NULL;
+    d3d12_info.flags = desc->Flags;
+    d3d12_info.type = type;
+
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.pNext = NULL;
+    buffer_info.pNext = &d3d12_info;
     buffer_info.flags = 0;
     buffer_info.size = desc->Width;
 
@@ -492,12 +498,13 @@ static bool vkd3d_format_check_usage_support(struct d3d12_device *device, VkForm
 
 static HRESULT vkd3d_create_image(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
-        const D3D12_RESOURCE_DESC1 *desc, struct d3d12_resource *resource, VkImage *vk_image)
+        const D3D12_RESOURCE_DESC1 *desc, struct d3d12_resource *resource, VkVkd3dTypeJUICE type, VkImage *vk_image)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_format_compatibility_list compat_list;
     const bool sparse_resource = !heap_properties;
     VkImageFormatListCreateInfoKHR format_list;
+    VkD3D12ResourceCreateInfoJUICE d3d12_info;
     const struct vkd3d_format *format;
     VkImageCreateInfo image_info;
     bool use_concurrent;
@@ -517,8 +524,13 @@ static HRESULT vkd3d_create_image(struct d3d12_device *device,
         format = resource->format;
     }
 
+    d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
+    d3d12_info.pNext = NULL;
+    d3d12_info.flags = desc->Flags;
+    d3d12_info.type = type;
+
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.pNext = NULL;
+    image_info.pNext = &d3d12_info;
     image_info.flags = 0;
     if (!(desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
     {
@@ -780,7 +792,7 @@ HRESULT vkd3d_get_image_allocation_info(struct d3d12_device *device,
     }
 
     /* XXX: We have to create an image to get its memory requirements. */
-    if (FAILED(hr = vkd3d_create_image(device, &heap_properties, 0, desc, NULL, &vk_image)))
+    if (FAILED(hr = vkd3d_create_image(device, &heap_properties, 0, desc, NULL, VK_VKD3D_TYPE_GET_REQUIREMENTS_JUICE, &vk_image)))
         return hr;
 
     VK_CALL(vkGetImageMemoryRequirements(device->vk_device, vk_image, &requirements));
@@ -2599,7 +2611,7 @@ static HRESULT d3d12_resource_create_vk_resource(struct d3d12_resource *resource
     if (resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
     {
         if (FAILED(hr = vkd3d_create_buffer(device, heap_properties,
-                D3D12_HEAP_FLAG_NONE, &resource->desc, &resource->res.vk_buffer)))
+                D3D12_HEAP_FLAG_NONE, &resource->desc, VK_VKD3D_TYPE_NONE_JUICE, &resource->res.vk_buffer)))
             return hr;
     }
     else
@@ -2610,7 +2622,7 @@ static HRESULT d3d12_resource_create_vk_resource(struct d3d12_resource *resource
             resource->desc.MipLevels = max_miplevel_count(&resource->desc);
 
         if (FAILED(hr = vkd3d_create_image(device, heap_properties,
-                D3D12_HEAP_FLAG_NONE, &resource->desc, resource, &resource->res.vk_image)))
+                D3D12_HEAP_FLAG_NONE, &resource->desc, resource, VK_VKD3D_TYPE_NONE_JUICE, &resource->res.vk_image)))
             return hr;
     }
 
@@ -5650,7 +5662,7 @@ static HRESULT d3d12_descriptor_heap_init_data_buffer(struct d3d12_descriptor_he
 
         heap_flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
 
-        if (FAILED(hr = vkd3d_create_buffer(device, &heap_info, heap_flags, &buffer_desc, &descriptor_heap->vk_buffer)))
+        if (FAILED(hr = vkd3d_create_buffer(device, &heap_info, heap_flags, &buffer_desc, VK_VKD3D_TYPE_DESCRIPTOR_HEAP_SHADER_VISIBLE_JUICE, &descriptor_heap->vk_buffer)))
             return hr;
 
         property_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -6213,7 +6225,7 @@ HRESULT d3d12_query_heap_create(struct d3d12_device *device, const D3D12_QUERY_H
         buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
         if (FAILED(hr = vkd3d_create_buffer(device, &heap_properties,
-                D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS, &buffer_desc, &object->vk_buffer)))
+                D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS, &buffer_desc, VK_VKD3D_TYPE_QUERY_DATA_JUICE, &object->vk_buffer)))
         {
             vkd3d_free(object);
             return hr;
