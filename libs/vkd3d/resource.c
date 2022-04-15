@@ -88,7 +88,7 @@ VkSampleCountFlagBits vk_samples_from_dxgi_sample_desc(const DXGI_SAMPLE_DESC *d
 
 HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
-        const D3D12_RESOURCE_DESC1 *desc, VkVkd3dTypeJUICE type, VkBuffer *vk_buffer)
+        const D3D12_RESOURCE_DESC1 *desc, VkVkd3dTypeJUICE vkd3dType, VkBuffer *vk_buffer)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     VkExternalMemoryBufferCreateInfo external_info;
@@ -102,8 +102,7 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
 
     d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
     d3d12_info.pNext = NULL;
-    d3d12_info.flags = desc->Flags;
-    d3d12_info.type = type;
+    d3d12_info.vkd3dType = vkd3dType;
 
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.pNext = &d3d12_info;
@@ -498,7 +497,7 @@ static bool vkd3d_format_check_usage_support(struct d3d12_device *device, VkForm
 
 static HRESULT vkd3d_create_image(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
-        const D3D12_RESOURCE_DESC1 *desc, struct d3d12_resource *resource, VkVkd3dTypeJUICE type, VkImage *vk_image)
+        const D3D12_RESOURCE_DESC1 *desc, struct d3d12_resource *resource, VkVkd3dTypeJUICE vkd3dType, VkImage *vk_image)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_format_compatibility_list compat_list;
@@ -526,8 +525,7 @@ static HRESULT vkd3d_create_image(struct d3d12_device *device,
 
     d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
     d3d12_info.pNext = NULL;
-    d3d12_info.flags = desc->Flags;
-    d3d12_info.type = type;
+    d3d12_info.vkd3dType = vkd3dType;
 
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.pNext = &d3d12_info;
@@ -2957,6 +2955,7 @@ HRESULT d3d12_resource_create_reserved(struct d3d12_device *device,
     if (d3d12_resource_is_buffer(object))
     {
         object->res.size = object->desc.Width;
+        object->res.allocation = NULL;
 
         if (device->device_info.buffer_device_address_features.bufferDeviceAddress)
             object->res.va = vkd3d_get_buffer_device_address(device, object->res.vk_buffer);
@@ -3871,6 +3870,7 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     const struct vkd3d_unique_resource *resource = NULL;
+    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     union vkd3d_descriptor_info descriptor_info;
     struct vkd3d_descriptor_binding binding;
     VkDescriptorType vk_descriptor_type;
@@ -3904,6 +3904,15 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
     descriptor_info.buffer.buffer = resource->vk_buffer;
     descriptor_info.buffer.offset = desc->BufferLocation - resource->va;
     descriptor_info.buffer.range = min(desc->SizeInBytes, resource->size - descriptor_info.buffer.offset);
+
+    bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+    bufferViewCreateInfo.pNext = NULL;
+    bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE;
+    bufferViewCreateInfo.buffer = descriptor_info.buffer.buffer;
+    bufferViewCreateInfo.offset = descriptor_info.buffer.offset;
+    bufferViewCreateInfo.size = descriptor_info.buffer.range;
+
+    VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
 
     info_index = vkd3d_bindless_state_find_set_info_index(&device->bindless_state, VKD3D_BINDLESS_SET_CBV);
     binding = vkd3d_bindless_state_binding_from_info_index(&device->bindless_state, info_index);

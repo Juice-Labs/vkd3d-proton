@@ -167,6 +167,7 @@ VK_DEVICE_PFN(vkSetEvent)
 VK_DEVICE_PFN(vkUnmapMemory)
 VK_DEVICE_PFN(vkUpdateDescriptorSets)
 VK_DEVICE_PFN(vkWaitForFences)
+VK_DEVICE_PFN(vkCreateBufferViewJUICE)
 
 /* VK_KHR_buffer_device_address */
 VK_DEVICE_EXT_PFN(vkGetBufferDeviceAddressKHR)
