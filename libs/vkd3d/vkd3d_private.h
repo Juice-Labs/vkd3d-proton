@@ -38,6 +38,7 @@
 #include "vkd3d_swapchain_factory.h"
 #include "vkd3d_command_list_vkd3d_ext.h"
 #include "vkd3d_device_vkd3d_ext.h"
+#include "vkd3d_compatibility.h"
 #include "vkd3d_string.h"
 #include <assert.h>
 #include <inttypes.h>
@@ -2240,10 +2241,13 @@ struct d3d12_swapchain_factory
 
 HRESULT d3d12_swapchain_factory_init(struct d3d12_command_queue *queue, struct d3d12_swapchain_factory *factory);
 
+
 /* ID3D12CommandQueue */
 struct d3d12_command_queue
 {
     ID3D12CommandQueue ID3D12CommandQueue_iface;
+    ID3D12CompatibilityQueue ID3D12CompatibilityQueue_iface;
+    ID3D12CommandQueueInternal ID3D12CommandQueueInternal_iface;
     LONG refcount;
 
     D3D12_COMMAND_QUEUE_DESC desc;
@@ -3044,10 +3048,14 @@ struct vkd3d_descriptor_qa_heap_buffer_data;
 /* ID3D12DeviceExt */
 typedef ID3D12DeviceExt d3d12_device_vkd3d_ext_iface;
 
+/* ID3D12CompatibilityDevice */
+typedef ID3D12CompatibilityDevice d3d12_device_compatibility_iface;
+
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
     d3d12_device_vkd3d_ext_iface ID3D12DeviceExt_iface;
+    d3d12_device_compatibility_iface ID3D12CompatibilityDevice_iface;
     LONG refcount;
 
     VkDevice vk_device;

@@ -10182,6 +10182,66 @@ static struct d3d12_command_list *d3d12_command_list_from_iface(ID3D12CommandLis
     return CONTAINING_RECORD(iface, struct d3d12_command_list, ID3D12GraphicsCommandList_iface);
 }
 
+/* ID3D12CompatibilityQueue */
+static inline struct d3d12_command_queue *impl_from_ID3D12CompatibilityQueue(ID3D12CompatibilityQueue *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d12_command_queue, ID3D12CompatibilityQueue_iface);
+}
+
+extern ULONG STDMETHODCALLTYPE d3d12_command_queue_AddRef(ID3D12CommandQueue *iface);
+
+static ULONG STDMETHODCALLTYPE d3d12_compatibility_queue_AddRef(ID3D12CompatibilityQueue *iface)
+{
+    struct d3d12_command_queue *command_queue = impl_from_ID3D12CompatibilityQueue(iface);
+    return d3d12_command_queue_AddRef(&command_queue->ID3D12CommandQueue_iface);
+}
+
+extern ULONG STDMETHODCALLTYPE d3d12_command_queue_Release(ID3D12CommandQueue *iface);
+
+static ULONG STDMETHODCALLTYPE d3d12_compatibility_queue_Release(ID3D12CompatibilityQueue *iface)
+{
+    struct d3d12_command_queue *command_queue = impl_from_ID3D12CompatibilityQueue(iface);
+    return d3d12_command_queue_Release(&command_queue->ID3D12CommandQueue_iface);
+}
+
+extern HRESULT STDMETHODCALLTYPE d3d12_command_queue_QueryInterface(ID3D12CommandQueue *iface,
+        REFIID riid, void **object);
+
+static HRESULT STDMETHODCALLTYPE d3d12_compatibility_queue_QueryInterface(ID3D12CompatibilityQueue *iface,
+        REFIID riid, void **object)
+{
+    struct d3d12_command_queue *command_queue = impl_from_ID3D12CompatibilityQueue(iface);
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(riid), object);
+    return d3d12_command_queue_QueryInterface(&command_queue->ID3D12CommandQueue_iface, riid, object);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d12_compatibility_queue_AcquireKeyedMutex(
+    ID3D12CompatibilityQueue *iface, ID3D12Object *pHeapOrResourceWithKeyedMutex, UINT64 Key, 
+    DWORD dwTimeout, void *pReserved, UINT Reserved)
+{
+    return E_FAIL;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d12_compatibility_queue_ReleaseKeyedMutex(
+    ID3D12CompatibilityQueue *iface, ID3D12Object *pHeapOrResourceWithKeyedMutex, UINT64 Key, 
+    void *pReserved, UINT Reserved)
+{
+    return E_FAIL;
+}
+
+static CONST_VTBL struct ID3D12CompatibilityQueueVtbl d3d12_compatiblity_queue_vtbl =
+{
+    /* IUnknown methods */
+    d3d12_compatibility_queue_QueryInterface,
+    d3d12_compatibility_queue_AddRef,
+    d3d12_compatibility_queue_Release,
+    /* ID3D12CompatibilityQueue methods */
+    d3d12_compatibility_queue_AcquireKeyedMutex,
+    d3d12_compatibility_queue_ReleaseKeyedMutex,
+};
+
+extern ULONG STDMETHODCALLTYPE d3d12_command_queue_internal_AddRef(ID3D12CommandQueueInternal *iface);
+
 /* ID3D12CommandQueue */
 static inline struct d3d12_command_queue *impl_from_ID3D12CommandQueue(ID3D12CommandQueue *iface)
 {
@@ -10201,6 +10261,22 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_queue_QueryInterface(ID3D12Comman
     {
         ID3D12CommandQueue_AddRef(iface);
         *object = iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID(riid, &IID_ID3D12CompatibilityDevice))
+    {
+        struct d3d12_command_queue *command_queue = impl_from_ID3D12CommandQueue(iface);
+        d3d12_compatibility_queue_AddRef(&command_queue->ID3D12CompatibilityQueue_iface);
+        *object = &command_queue->ID3D12CompatibilityQueue_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID(riid, &IID_ID3D12CommandQueueInternal))
+    {
+        struct d3d12_command_queue *command_queue = impl_from_ID3D12CommandQueue(iface);
+        d3d12_command_queue_internal_AddRef(&command_queue->ID3D12CommandQueueInternal_iface);
+        *object = &command_queue->ID3D12CommandQueueInternal_iface;
         return S_OK;
     }
 
@@ -11783,6 +11859,7 @@ static HRESULT d3d12_command_queue_init(struct d3d12_command_queue *queue,
     int rc;
 
     queue->ID3D12CommandQueue_iface.lpVtbl = &d3d12_command_queue_vtbl;
+    queue->ID3D12CompatibilityQueue_iface.lpVtbl = &d3d12_compatiblity_queue_vtbl;
     queue->refcount = 1;
 
     queue->desc = *desc;

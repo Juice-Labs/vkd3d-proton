@@ -1,0 +1,64 @@
+/*
+ * Copyright 2022 Juice Technologies, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+import "vkd3d_windows.h";
+
+import "vkd3d_d3d12.idl";
+import "vkd3d_d3d11on12.idl";
+
+typedef enum D3D12_COMPATIBILITY_SHARED_FLAGS
+{
+    D3D12_COMPATIBILITY_SHARED_FLAG_NONE	= 0,
+    D3D12_COMPATIBILITY_SHARED_FLAG_NON_NT_HANDLE	= 0x1,
+    D3D12_COMPATIBILITY_SHARED_FLAG_KEYED_MUTEX	= 0x2,
+    D3D12_COMPATIBILITY_SHARED_FLAG_9_ON_12	= 0x4
+} 	D3D12_COMPATIBILITY_SHARED_FLAGS;
+
+cpp_quote("DEFINE_ENUM_FLAG_OPERATORS( D3D12_COMPATIBILITY_SHARED_FLAGS );")
+
+typedef enum D3D12_REFLECT_SHARED_PROPERTY
+{
+    D3D12_REFLECT_SHARED_PROPERTY_D3D11_RESOURCE_FLAGS	= 0,
+    D3D12_REFELCT_SHARED_PROPERTY_COMPATIBILITY_SHARED_FLAGS	= ( D3D12_REFLECT_SHARED_PROPERTY_D3D11_RESOURCE_FLAGS + 1 ) ,
+    D3D12_REFLECT_SHARED_PROPERTY_NON_NT_SHARED_HANDLE	= ( D3D12_REFELCT_SHARED_PROPERTY_COMPATIBILITY_SHARED_FLAGS + 1 ) 
+} 	D3D12_REFLECT_SHARED_PROPERTY;
+
+[
+    uuid(8f1c0e3c-fae3-4a82-b098-bfe1708207ff),
+    object,
+    local,
+    pointer_default(unique)
+]
+interface ID3D12CompatibilityDevice : IUnknown
+{
+    HRESULT CreateSharedResource(const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, const D3D11_RESOURCE_FLAGS *pFlags11, D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags, ID3D12LifetimeTracker *pLifetimeTracker, ID3D12SwapChainAssistant *pOwningSwapchain, REFIID riid, void **ppResource);
+    HRESULT CreateSharedHeap(const D3D12_HEAP_DESC *pHeapDesc, D3D12_COMPATIBILITY_SHARED_FLAGS CompatibilityFlags, REFIID riid, void **ppHeap);
+    HRESULT ReflectSharedProperties(ID3D12Object *pHeapOrResource, D3D12_REFLECT_SHARED_PROPERTY ReflectType, void *pData, UINT DataSize);
+}
+
+[
+    uuid(7974c836-9520-4cda-8d43-d996622e8926),
+    object,
+    local,
+    pointer_default(unique)
+]
+interface ID3D12CompatibilityQueue : IUnknown
+{
+    HRESULT AcquireKeyedMutex(ID3D12Object *pHeapOrResourceWithKeyedMutex, UINT64 Key, DWORD dwTimeout, void *pReserved, UINT Reserved);
+    HRESULT ReleaseKeyedMutex(ID3D12Object *pHeapOrResourceWithKeyedMutex, UINT64 Key, void *pReserved, UINT Reserved);
+}

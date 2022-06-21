@@ -2672,6 +2672,8 @@ void d3d12_device_return_query_pool(struct d3d12_device *device, const struct vk
 /* ID3D12Device */
 extern ULONG STDMETHODCALLTYPE d3d12_device_vkd3d_ext_AddRef(ID3D12DeviceExt *iface);
 
+extern ULONG STDMETHODCALLTYPE d3d12_device_compatibility_AddRef(ID3D12CompatibilityDevice *iface);
+
 HRESULT STDMETHODCALLTYPE d3d12_device_QueryInterface(d3d12_device_iface *iface,
         REFIID riid, void **object)
 {
@@ -2700,6 +2702,14 @@ HRESULT STDMETHODCALLTYPE d3d12_device_QueryInterface(d3d12_device_iface *iface,
         struct d3d12_device *device = impl_from_ID3D12Device(iface);
         d3d12_device_vkd3d_ext_AddRef(&device->ID3D12DeviceExt_iface);
         *object = &device->ID3D12DeviceExt_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID(riid, &IID_ID3D12CompatibilityDevice))
+    {
+        struct d3d12_device *device = impl_from_ID3D12Device(iface);
+        d3d12_device_compatibility_AddRef(&device->ID3D12CompatibilityDevice_iface);
+        *object = &device->ID3D12CompatibilityDevice_iface;
         return S_OK;
     }
 
@@ -2857,10 +2867,27 @@ static ULONG STDMETHODCALLTYPE d3d12_device_Release(d3d12_device_iface *iface)
 static HRESULT STDMETHODCALLTYPE d3d12_device_GetPrivateData(d3d12_device_iface *iface,
         REFGUID guid, UINT *data_size, void *data)
 {
+    static uint8_t GUID_KMT_HANDLE_BYTES[] = {
+        0xdf, 0xc5, 0x20, 0x1a, 
+        0x65, 0x8f, 0x5a, 0x40, 
+        0x99, 0x82, 0x20, 0x58, 
+        0x83, 0x9f, 0x7b, 0x27};
     struct d3d12_device *device = impl_from_ID3D12Device(iface);
 
     TRACE("iface %p, guid %s, data_size %p, data %p.\n",
             iface, debugstr_guid(guid), data_size, data);
+
+    if (IsEqualGUID(guid, (GUID*)&GUID_KMT_HANDLE_BYTES))
+    {
+        static uint8_t JUICE_KMT_HANDLE[] = {
+            0xff, 0xfe, 0xfd, 0xfc
+        };
+
+        *data_size = 4;
+        if (data != 0)
+            *(uint32_t*)data = *(uint32_t*)JUICE_KMT_HANDLE;
+        return S_OK;
+    }
 
     return vkd3d_get_private_data(&device->private_store, guid, data_size, data);
 }
@@ -6012,6 +6039,10 @@ static bool d3d12_device_supports_feature_level(struct d3d12_device *device, D3D
 
 extern CONST_VTBL struct ID3D12DeviceExtVtbl d3d12_device_vkd3d_ext_vtbl;
 
+extern CONST_VTBL struct ID3D12CompatibilityDeviceVtbl d3d12_device_compatibility_vtbl;
+
+extern CONST_VTBL struct ID3D12DeviceInternalVtbl d3d12_device_internal_vtbl;
+
 static HRESULT d3d12_device_init(struct d3d12_device *device,
         struct vkd3d_instance *instance, const struct vkd3d_device_create_info *create_info)
 {
@@ -6047,6 +6078,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     }
     
     device->ID3D12DeviceExt_iface.lpVtbl = &d3d12_device_vkd3d_ext_vtbl;
+    device->ID3D12CompatibilityDevice_iface.lpVtbl = &d3d12_device_compatibility_vtbl;
 
     if (FAILED(hr = vkd3d_create_vk_device(device, create_info)))
         goto out_free_mutex;
