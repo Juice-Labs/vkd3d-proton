@@ -3196,13 +3196,15 @@ static bool vk_format_is_supported_by_global_read_write_without_format(VkFormat 
     return false;
 }
 
+static const UINT 
+
 static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D12_FEATURE_DATA_FORMAT_SUPPORT *data)
 {
-    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-    VkFormatFeatureFlags2KHR image_features;
-    VkFormatProperties3KHR properties3;
+    //const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    //VkFormatFeatureFlags2KHR image_features;
+    //VkFormatProperties3KHR properties3;
     const struct vkd3d_format *format;
-    VkFormatProperties2 properties;
+    //VkFormatProperties2 properties;
 
     data->Support1 = D3D12_FORMAT_SUPPORT1_NONE;
     data->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
@@ -3213,6 +3215,8 @@ static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D1
         FIXME("Unhandled format %#x.\n", data->Format);
         return E_INVALIDARG;
     }
+
+    vkd3d_get_required_format_support(device, data);
 
     properties.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
     properties.pNext = NULL;

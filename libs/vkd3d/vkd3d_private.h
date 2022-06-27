@@ -3106,6 +3106,8 @@ struct d3d12_device
     const struct vkd3d_format *depth_stencil_formats;
     unsigned int format_compatibility_list_count;
     const struct vkd3d_format_compatibility_list *format_compatibility_lists;
+    unsigned int required_format_support_list_count;
+    const struct D3D12_FEATURE_DATA_FORMAT_SUPPORT *required_format_support_list;
     struct vkd3d_bindless_state bindless_state;
     struct vkd3d_memory_info memory_info;
     struct vkd3d_meta_ops meta_ops;
@@ -3400,6 +3402,7 @@ void vkd3d_format_copy_data(const struct vkd3d_format *format, const uint8_t *sr
         unsigned int src_row_pitch, unsigned int src_slice_pitch, uint8_t *dst, unsigned int dst_row_pitch,
         unsigned int dst_slice_pitch, unsigned int w, unsigned int h, unsigned int d);
 
+void vkd3d_get_required_format_support(const struct d3d12_device *device, DXGI_FORMAT dxgi_format);
 const struct vkd3d_format *vkd3d_get_format(const struct d3d12_device *device,
         DXGI_FORMAT dxgi_format, bool depth_stencil);
 VkFormat vkd3d_internal_get_vk_format(const struct d3d12_device *device, DXGI_FORMAT dxgi_format);
