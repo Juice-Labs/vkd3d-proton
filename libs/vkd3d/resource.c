@@ -782,11 +782,10 @@ static HRESULT vkd3d_create_image(struct d3d12_device *device,
 
     d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
     d3d12_info.pNext = NULL;
-    d3d12_info.flags = desc->Flags;
-    d3d12_info.type = type;
+    d3d12_info.vkd3dType = type;
 
-    d3d12_info.pNext = create_info.pNext;
-    create_info.pNext = &d3d12_info;
+    d3d12_info.pNext = create_info.image_info.pNext;
+    create_info.image_info.pNext = &d3d12_info;
 
     if ((vr = VK_CALL(vkCreateImage(device->vk_device, &create_info.image_info, NULL, vk_image))) < 0)
         WARN("Failed to create Vulkan image, vr %d.\n", vr);

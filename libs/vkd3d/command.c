@@ -12795,7 +12795,7 @@ static HRESULT d3d12_command_signature_init_patch_commands_buffer(struct d3d12_c
     buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     if (FAILED(hr = vkd3d_create_buffer(device, &heap_info, D3D12_HEAP_FLAG_NONE,
-            &buffer_desc, &signature->state_template.buffer)))
+            &buffer_desc, VK_VKD3D_TYPE_NONE_JUICE, &signature->state_template.buffer)))
         return hr;
 
     if (FAILED(hr = vkd3d_allocate_buffer_memory(device, signature->state_template.buffer,
