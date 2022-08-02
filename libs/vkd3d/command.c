@@ -8029,14 +8029,17 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
                 stride = views[i].StrideInBytes;
                 size = views[i].SizeInBytes;
 
-                bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-                bufferViewCreateInfo.pNext = NULL;
-                bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE;
-                bufferViewCreateInfo.buffer = buffer;
-                bufferViewCreateInfo.offset = offset;
-                bufferViewCreateInfo.size = size;
+                if(VK_CALL(vkCreateBufferViewJUICE))
+                {
+                    bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+                    bufferViewCreateInfo.pNext = NULL;
+                    bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE;
+                    bufferViewCreateInfo.buffer = buffer;
+                    bufferViewCreateInfo.offset = offset;
+                    bufferViewCreateInfo.size = size;
 
-                VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
+                    VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
+                }
             }
             else
             {

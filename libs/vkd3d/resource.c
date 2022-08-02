@@ -3972,14 +3972,17 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
 
     VK_CALL(vkUpdateDescriptorSets(device->vk_device, 1, &vk_write, 0, NULL));
 
-    bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-    bufferViewCreateInfo.pNext = NULL;
-    bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE;
-    bufferViewCreateInfo.buffer = descriptor_info.buffer.buffer;
-    bufferViewCreateInfo.offset = descriptor_info.buffer.offset;
-    bufferViewCreateInfo.size = descriptor_info.buffer.range;
+    if (VK_CALL(vkCreateBufferViewJUICE))
+    {
+        bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+        bufferViewCreateInfo.pNext = NULL;
+        bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE;
+        bufferViewCreateInfo.buffer = descriptor_info.buffer.buffer;
+        bufferViewCreateInfo.offset = descriptor_info.buffer.offset;
+        bufferViewCreateInfo.size = descriptor_info.buffer.range;
 
-    VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
+        VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
+    }
 }
 
 static unsigned int vkd3d_view_flags_from_d3d12_buffer_srv_flags(D3D12_BUFFER_SRV_FLAGS flags)
@@ -4231,14 +4234,17 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
         vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                 vk_descriptor_type, &descriptor_info[vk_write_count]);
 
-        bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-        bufferViewCreateInfo.pNext = NULL;
-        bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
-        bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
-        bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
-        bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
+        if(VK_CALL(vkCreateBufferViewJUICE))
+        {
+            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+            bufferViewCreateInfo.pNext = NULL;
+            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
+            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
+            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
+            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
 
-        VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+        }
 
         vk_write_count++;
     }
@@ -4277,13 +4283,16 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
 
         if (descriptor_info[vk_write_count].buffer_view)
         {
-            VkD3D12BindBufferViewInfoJUICE bindViewInfo;
-            bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
-            bindViewInfo.pNext = NULL;
-            bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
-            bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
+            if(VK_CALL(vkBindBufferViewJUICE))
+            {
+                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
+                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
+                bindViewInfo.pNext = NULL;
+                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
+                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
 
-            VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            }
         }
 
         vk_write_count++;
@@ -4449,13 +4458,16 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
 
     if (descriptor_info.image.imageView)
     {
-        VkD3D12BindImageViewInfoJUICE bindViewInfo;
-        bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_IMAGE_VIEW_INFO_JUICE;
-        bindViewInfo.pNext = NULL;
-        bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
-        bindViewInfo.imageView = descriptor_info.image.imageView;
+        if(VK_CALL(vkBindImageViewJUICE))
+        {
+            VkD3D12BindImageViewInfoJUICE bindViewInfo;
+            bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_IMAGE_VIEW_INFO_JUICE;
+            bindViewInfo.pNext = NULL;
+            bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
+            bindViewInfo.imageView = descriptor_info.image.imageView;
 
-        VK_CALL(vkBindImageViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            VK_CALL(vkBindImageViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+        }
     }
 }
 
@@ -4617,14 +4629,17 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
         vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                 vk_descriptor_type, &descriptor_info[vk_write_count]);
 
-        bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-        bufferViewCreateInfo.pNext = NULL;
-        bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-        bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
-        bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
-        bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
+        if(VK_CALL(vkCreateBufferViewJUICE))
+        {
+            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+            bufferViewCreateInfo.pNext = NULL;
+            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
+            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
+            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
 
-        VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+        }
 
         vk_write_count++;
     }
@@ -4664,13 +4679,16 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
 
         if (descriptor_info[vk_write_count].buffer_view)
         {
-            VkD3D12BindBufferViewInfoJUICE bindViewInfo;
-            bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
-            bindViewInfo.pNext = NULL;
-            bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-            bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
+            if(VK_CALL(vkBindBufferViewJUICE))
+            {
+                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
+                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
+                bindViewInfo.pNext = NULL;
+                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
 
-            VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            }
         }
 
         vk_write_count++;
@@ -4732,13 +4750,16 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
 
         if (descriptor_info[vk_write_count].buffer_view)
         {
-            VkD3D12BindBufferViewInfoJUICE bindViewInfo;
-            bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
-            bindViewInfo.pNext = NULL;
-            bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-            bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
+            if(VK_CALL(vkBindBufferViewJUICE))
+            {
+                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
+                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
+                bindViewInfo.pNext = NULL;
+                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
 
-            VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            }
         }
 
         vk_write_count++;
@@ -4860,13 +4881,16 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
 
     if (descriptor_info.image.imageView)
     {
-        VkD3D12BindImageViewInfoJUICE bindViewInfo;
-        bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_IMAGE_VIEW_INFO_JUICE;
-        bindViewInfo.pNext = NULL;
-        bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-        bindViewInfo.imageView = descriptor_info.image.imageView;
+        if(VK_CALL(vkBindImageViewJUICE))
+        {
+            VkD3D12BindImageViewInfoJUICE bindViewInfo;
+            bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_IMAGE_VIEW_INFO_JUICE;
+            bindViewInfo.pNext = NULL;
+            bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+            bindViewInfo.imageView = descriptor_info.image.imageView;
 
-        VK_CALL(vkBindImageViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            VK_CALL(vkBindImageViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+        }
     }
 }
 
