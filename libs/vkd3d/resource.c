@@ -166,6 +166,28 @@ static inline VkDeviceSize adjust_sparse_buffer_size(VkDeviceSize size)
     return size;
 }
 
+static VkVkd3dTypeJUICE vkd3d_juice_type_from_buffer_tag(const char *tag)
+{
+    if (!tag)
+        return VK_VKD3D_TYPE_NONE_JUICE;
+    if (!strcmp(tag, "breadcrumb-host-buffer"))
+        return VK_VKD3D_TYPE_TRACER_JUICE;
+    if (!strcmp(tag, "debug-ring-host") || !strcmp(tag, "debug-ring-atomic"))
+        return VK_VKD3D_TYPE_SHADER_DEBUG_RING_JUICE;
+    if (!strcmp(tag, "qa-buffer") || !strcmp(tag, "qa-payload") || !strcmp(tag, "qa-control"))
+        return VK_VKD3D_TYPE_DESCRIPTOR_DEBUG_JUICE;
+    if (!strcmp(tag, "global-buffer") || !strcmp(tag, "explicit-usage-global-buffer"))
+        return VK_VKD3D_TYPE_GLOBAL_MEMORY_BUFFER_JUICE;
+    if (!strcmp(tag, "descriptor-buffer"))
+        return VK_VKD3D_TYPE_DESCRIPTOR_HEAP_SHADER_VISIBLE_JUICE;
+    if (!strcmp(tag, "query-heap"))
+        return VK_VKD3D_TYPE_QUERY_DATA_JUICE;
+    if (!strcmp(tag, "dgc-state-template"))
+        return VK_VKD3D_TYPE_COMMANDS_JUICE;
+
+    return VK_VKD3D_TYPE_NONE_JUICE;
+}
+
 HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
         const D3D12_RESOURCE_DESC1 *desc, const char *tag, VkBuffer *vk_buffer)
@@ -174,13 +196,20 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
     VkExternalMemoryBufferCreateInfo external_info;
     const bool sparse_resource = !heap_properties;
     VkBufferCreateInfo buffer_info;
+    VkD3D12ResourceCreateInfoJUICE d3d12_info;
+    VkVkd3dTypeJUICE vkd3d_type;
     D3D12_HEAP_TYPE heap_type;
     VkResult vr;
 
     heap_type = heap_properties ? heap_properties->Type : D3D12_HEAP_TYPE_DEFAULT;
+    vkd3d_type = vkd3d_juice_type_from_buffer_tag(tag);
+
+    d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
+    d3d12_info.pNext = NULL;
+    d3d12_info.vkd3dType = vkd3d_type;
 
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.pNext = NULL;
+    buffer_info.pNext = &d3d12_info;
     buffer_info.flags = 0;
     buffer_info.size = desc->Width;
 
@@ -189,7 +218,7 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
     if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER)
     {
         external_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
-        external_info.pNext = NULL;
+        external_info.pNext = buffer_info.pNext;
         external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
         buffer_info.pNext = &external_info;
     }
@@ -1158,12 +1187,18 @@ static HRESULT vkd3d_create_image(struct d3d12_device *device,
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_image_create_info create_info;
+    VkD3D12ResourceCreateInfoJUICE d3d12_info;
     VkResult vr;
     HRESULT hr;
 
     if (FAILED(hr = vkd3d_get_image_create_info(device, heap_properties,
             desc, resource, num_castable_formats, castable_formats, &create_info)))
         return hr;
+
+    d3d12_info.sType = VK_STRUCTURE_TYPE_D3D12_RESOURCE_CREATE_INFO_JUICE;
+    d3d12_info.pNext = create_info.image_info.pNext;
+    d3d12_info.vkd3dType = VK_VKD3D_TYPE_NONE_JUICE;
+    create_info.image_info.pNext = &d3d12_info;
 
     /* In case we get address binding callbacks, ensure driver knows it's not a sparse bind that happens async. */
     vkd3d_address_binding_tracker_mark_user_thread();
@@ -6515,6 +6550,7 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
         const D3D12_SHADER_RESOURCE_VIEW_DESC *desc)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     VKD3D_UNUSED vkd3d_descriptor_qa_flags descriptor_qa_flags = 0;
     struct vkd3d_bound_buffer_range bound_range = { 0, 0, 0, 0 };
     union vkd3d_descriptor_info descriptor_info[2];
@@ -6654,6 +6690,16 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
 
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
+
+            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+            bufferViewCreateInfo.pNext = NULL;
+            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
+            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
+            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
+            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
+
+            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+
             vk_write_count++;
         }
     }
@@ -6721,6 +6767,18 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
             descriptor_info[vk_write_count].buffer_view = view ? view->vk_buffer_view : VK_NULL_HANDLE;
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
+
+            if (descriptor_info[vk_write_count].buffer_view)
+            {
+                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
+                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
+                bindViewInfo.pNext = NULL;
+                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
+                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
+
+                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            }
+
             vk_write_count++;
         }
     }
@@ -7559,6 +7617,7 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
         const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     VKD3D_UNUSED vkd3d_descriptor_qa_flags descriptor_qa_flags = 0;
     struct vkd3d_bound_buffer_range bound_range = { 0, 0, 0, 0 };
     union vkd3d_descriptor_info descriptor_info[3];
@@ -7670,6 +7729,16 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
 
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
+
+            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+            bufferViewCreateInfo.pNext = NULL;
+            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
+            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
+            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
+
+            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
+
             vk_write_count++;
         }
     }
@@ -7741,6 +7810,18 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
 
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
+
+            if (descriptor_info[vk_write_count].buffer_view)
+            {
+                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
+                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
+                bindViewInfo.pNext = NULL;
+                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
+                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
+
+                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
+            }
+
             vk_write_count++;
         }
     }

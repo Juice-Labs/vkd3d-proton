@@ -828,6 +828,7 @@ struct vkd3d_allocate_resource_memory_info
 uint32_t vkd3d_get_priority_adjust(VkDeviceSize size);
 float vkd3d_convert_to_vk_prio(D3D12_RESIDENCY_PRIORITY d3d12prio);
 
+struct vkd3d_memory_allocation;
 struct vkd3d_view_map;
 
 struct vkd3d_cookie
@@ -846,6 +847,8 @@ struct vkd3d_unique_resource
     struct vkd3d_cookie cookie;
     VkDeviceAddress va;
     VkDeviceSize size;
+
+    struct vkd3d_memory_allocation *allocation;
 
     /* This is used to handle views when we cannot bind it to a
      * specific ID3D12Resource, i.e. RTAS. Only allocated as needed. */
