@@ -261,6 +261,8 @@ typedef HRESULT (WINAPI *PFN_SetThreadDescription)(HANDLE, PCWSTR);
 
 static inline void vkd3d_set_thread_name(const char *name)
 {
+    VKD3D_PROFILE_THREAD_NAME(name);
+
     PFN_SetThreadDescription set_thread_description;
     HMODULE module;
     WCHAR *wname;
