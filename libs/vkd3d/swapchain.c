@@ -2386,7 +2386,32 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
 
     vk_queue = vkd3d_queue_acquire(chain->queue->vkd3d_queue);
     VKD3D_REGION_BEGIN(queue_present);
-    vr = VK_CALL(vkQueuePresentKHR(vk_queue, &present_info));
+    {
+        static HMODULE JuiceHandle = NULL;
+
+        typedef void (*PFN_VOID)();
+        static PFN_VOID disableHooks = NULL;
+        static PFN_VOID enableHooks = NULL;
+
+        static bool juiceChecked = false;
+        if (!juiceChecked)
+        {
+            juiceChecked = true;
+
+            JuiceHandle = GetModuleHandleW(L"JuiceShim64.dll");
+            if (JuiceHandle != NULL)
+            {
+                disableHooks = (PFN_VOID)GetProcAddress(JuiceHandle, "DisableHooks");
+                enableHooks = (PFN_VOID)GetProcAddress(JuiceHandle, "EnableHooks");
+            }
+        }
+
+        if (disableHooks != NULL)
+            disableHooks();
+        vr = VK_CALL(vkQueuePresentKHR(vk_queue, &present_info));
+        if (enableHooks != NULL)
+            enableHooks();
+    }
     VKD3D_REGION_END(queue_present);
     vkd3d_queue_release(chain->queue->vkd3d_queue);
     VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
