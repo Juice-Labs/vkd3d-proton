@@ -6550,7 +6550,6 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
         const D3D12_SHADER_RESOURCE_VIEW_DESC *desc)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     VKD3D_UNUSED vkd3d_descriptor_qa_flags descriptor_qa_flags = 0;
     struct vkd3d_bound_buffer_range bound_range = { 0, 0, 0, 0 };
     union vkd3d_descriptor_info descriptor_info[2];
@@ -6691,15 +6690,6 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
 
-            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-            bufferViewCreateInfo.pNext = NULL;
-            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
-            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
-            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
-            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
-
-            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
-
             vk_write_count++;
         }
     }
@@ -6767,17 +6757,6 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
             descriptor_info[vk_write_count].buffer_view = view ? view->vk_buffer_view : VK_NULL_HANDLE;
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
-
-            if (descriptor_info[vk_write_count].buffer_view)
-            {
-                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
-                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
-                bindViewInfo.pNext = NULL;
-                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE;
-                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
-
-                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
-            }
 
             vk_write_count++;
         }
@@ -7617,7 +7596,6 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
         const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     VKD3D_UNUSED vkd3d_descriptor_qa_flags descriptor_qa_flags = 0;
     struct vkd3d_bound_buffer_range bound_range = { 0, 0, 0, 0 };
     union vkd3d_descriptor_info descriptor_info[3];
@@ -7730,15 +7708,6 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
 
-            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-            bufferViewCreateInfo.pNext = NULL;
-            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-            bufferViewCreateInfo.buffer = descriptor_info[vk_write_count].buffer.buffer;
-            bufferViewCreateInfo.offset = descriptor_info[vk_write_count].buffer.offset;
-            bufferViewCreateInfo.size = descriptor_info[vk_write_count].buffer.range;
-
-            VK_CALL(vkCreateBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bufferViewCreateInfo));
-
             vk_write_count++;
         }
     }
@@ -7810,17 +7779,6 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
 
             vkd3d_init_write_descriptor_set(&vk_write[vk_write_count], &d, binding,
                     vk_descriptor_type, &descriptor_info[vk_write_count]);
-
-            if (descriptor_info[vk_write_count].buffer_view)
-            {
-                VkD3D12BindBufferViewInfoJUICE bindViewInfo;
-                bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_BUFFER_VIEW_INFO_JUICE;
-                bindViewInfo.pNext = NULL;
-                bindViewInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE;
-                bindViewInfo.bufferView = descriptor_info[vk_write_count].buffer_view;
-
-                VK_CALL(vkBindBufferViewJUICE(resource->mem.device_allocation.vk_memory, &bindViewInfo));
-            }
 
             vk_write_count++;
         }
