@@ -125,6 +125,9 @@ static void vkd3d_dbg_init_once(void)
         if (module)
             wine_log_output = (void*)GetProcAddress(module, "__wine_dbg_output");
 #endif
+        HMODULE juicevlk = GetModuleHandleA("juicevlk.dll");
+        if (juicevlk)
+            wine_log_output = (void*)GetProcAddress(juicevlk, "__wine_dbg_output");
     }
 
     vkd3d_atomic_uint32_store_explicit(&vkd3d_dbg_initialized, 1, vkd3d_memory_order_release);
