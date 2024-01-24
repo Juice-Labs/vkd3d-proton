@@ -2691,6 +2691,16 @@ union vkd3d_descriptor_heap_state
     } sets;
 };
 
+struct d3d12_rtv_resolve
+{
+    struct d3d12_resource *src_resource;
+    struct d3d12_resource *dst_resource;
+    uint32_t region_index;
+    uint32_t region_count;
+    DXGI_FORMAT format;
+    D3D12_RESOLVE_MODE mode;
+};
+
 struct d3d12_command_list_iteration_indirect_meta
 {
     bool need_compute_to_indirect_barrier;
@@ -2758,8 +2768,19 @@ struct d3d12_command_list
 
     struct d3d12_command_list_sequence cmd;
 
+    bool is_inside_render_pass;
+    D3D12_RENDER_PASS_FLAGS render_pass_flags;
     struct d3d12_rtv_desc rtvs[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT];
     struct d3d12_rtv_desc dsv;
+
+    struct d3d12_rtv_resolve *rtv_resolves;
+    size_t rtv_resolve_size;
+    size_t rtv_resolve_count;
+
+    VkImageResolve2 *rtv_resolve_regions;
+    size_t rtv_resolve_region_size;
+    size_t rtv_resolve_region_count;
+
     uint32_t dsv_plane_optimal_mask;
     VkImageLayout dsv_layout;
     unsigned int fb_width;
@@ -3283,6 +3304,7 @@ enum vkd3d_breadcrumb_command_type
     VKD3D_BREADCRUMB_COMMAND_BARRIER,
     VKD3D_BREADCRUMB_COMMAND_AUX32, /* Used to report arbitrary 32-bit words as arguments to other commands. */
     VKD3D_BREADCRUMB_COMMAND_AUX64, /* Used to report arbitrary 64-bit words as arguments to other commands. */
+    VKD3D_BREADCRUMB_COMMAND_COOKIE, /* 64-bit value representing a resource. */
     VKD3D_BREADCRUMB_COMMAND_VBO,
     VKD3D_BREADCRUMB_COMMAND_IBO,
     VKD3D_BREADCRUMB_COMMAND_ROOT_TABLE,
@@ -3429,6 +3451,15 @@ void vkd3d_breadcrumb_tracer_dump_command_list(struct vkd3d_breadcrumb_tracer *t
     } \
 } while(0)
 
+#define VKD3D_BREADCRUMB_COOKIE(v) do { \
+    if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS) { \
+        struct vkd3d_breadcrumb_command breadcrumb_cmd; \
+        breadcrumb_cmd.type = VKD3D_BREADCRUMB_COMMAND_COOKIE; \
+        breadcrumb_cmd.word_64bit = v; \
+        vkd3d_breadcrumb_tracer_add_command(list, &breadcrumb_cmd); \
+    } \
+} while(0)
+
 #define VKD3D_BREADCRUMB_TAG(tag_static_str) do { \
     if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS) { \
         struct vkd3d_breadcrumb_command breadcrumb_cmd; \
@@ -3451,7 +3482,7 @@ static inline void vkd3d_breadcrumb_image(
 {
     const D3D12_RESOURCE_DESC1 *desc = &resource->desc;
     VKD3D_BREADCRUMB_TAG("ImageDesc [Cookie, DXGI_FORMAT, D3D12_RESOURCE_DIMENSION, width, height, DepthOrArraySize, MipLevels, Flags]");
-    VKD3D_BREADCRUMB_AUX64(resource->res.cookie);
+    VKD3D_BREADCRUMB_COOKIE(resource->res.cookie);
     VKD3D_BREADCRUMB_AUX32(desc->Format);
     VKD3D_BREADCRUMB_AUX32(desc->Dimension);
     VKD3D_BREADCRUMB_AUX64(desc->Width);
@@ -3467,8 +3498,8 @@ static inline void vkd3d_breadcrumb_buffer(
     VKD3D_BREADCRUMB_TAG("BufferDesc [VkBuffer VA, SuballocatedOffset, Cookie, GlobalCookie, Size, Flags]");
     VKD3D_BREADCRUMB_AUX64(resource->mem.resource.va);
     VKD3D_BREADCRUMB_AUX64(resource->mem.offset);
-    VKD3D_BREADCRUMB_AUX64(resource->res.cookie);
-    VKD3D_BREADCRUMB_AUX64(resource->mem.resource.cookie);
+    VKD3D_BREADCRUMB_COOKIE(resource->res.cookie);
+    VKD3D_BREADCRUMB_COOKIE(resource->mem.resource.cookie);
     VKD3D_BREADCRUMB_AUX64(resource->desc.Width);
     VKD3D_BREADCRUMB_AUX32(resource->desc.Flags);
 }
@@ -3543,6 +3574,7 @@ static inline void vkd3d_breadcrumb_buffer_copy(
 #define VKD3D_BREADCRUMB_COMMAND_STATE(type) ((void)(VKD3D_BREADCRUMB_COMMAND_##type))
 #define VKD3D_BREADCRUMB_AUX32(v) ((void)(v))
 #define VKD3D_BREADCRUMB_AUX64(v) ((void)(v))
+#define VKD3D_BREADCRUMB_COOKIE(v) ((void)(v))
 #define VKD3D_DEVICE_REPORT_BREADCRUMB_IF(device, cond) ((void)(device), (void)(cond))
 #define VKD3D_BREADCRUMB_FLUSH_BATCHES(list) ((void)(list))
 #define VKD3D_BREADCRUMB_TAG(tag) ((void)(tag))
@@ -3677,6 +3709,14 @@ static inline uint8_t *vkd3d_bindless_state_get_null_descriptor_payload(struct v
     return bindless_state->null_descriptor_payloads[index - 2];
 }
 
+enum vkd3d_format_type
+{
+    VKD3D_FORMAT_TYPE_OTHER,
+    VKD3D_FORMAT_TYPE_TYPELESS,
+    VKD3D_FORMAT_TYPE_SINT,
+    VKD3D_FORMAT_TYPE_UINT,
+};
+
 void vkd3d_format_compatibility_list_add_format(struct vkd3d_format_compatibility_list *list, VkFormat vk_format);
 
 struct vkd3d_memory_info_domain
@@ -3793,6 +3833,85 @@ struct vkd3d_copy_image_ops
     pthread_mutex_t mutex;
 
     struct vkd3d_copy_image_pipeline *pipelines;
+    size_t pipelines_size;
+    size_t pipeline_count;
+};
+
+enum vkd3d_resolve_image_path
+{
+    VKD3D_RESOLVE_IMAGE_PATH_UNSUPPORTED,
+    VKD3D_RESOLVE_IMAGE_PATH_DIRECT,
+    VKD3D_RESOLVE_IMAGE_PATH_RENDER_PASS_ATTACHMENT,
+    VKD3D_RESOLVE_IMAGE_PATH_RENDER_PASS_PIPELINE,
+    VKD3D_RESOLVE_IMAGE_PATH_COMPUTE_PIPELINE,
+};
+
+struct vkd3d_resolve_image_args
+{
+    VkOffset2D offset;
+    uint32_t bit_mask;
+};
+
+struct vkd3d_resolve_image_compute_args
+{
+    VkOffset2D dst_offset;
+    VkOffset2D src_offset;
+    VkExtent2D extent;
+};
+
+struct vkd3d_resolve_image_info
+{
+    VkDescriptorSetLayout vk_set_layout;
+    VkPipelineLayout vk_pipeline_layout;
+    VkPipeline vk_pipeline;
+    bool needs_stencil_mask;
+};
+
+struct vkd3d_resolve_image_graphics_pipeline_key
+{
+    const struct vkd3d_format *format;
+    VkImageAspectFlagBits dst_aspect;
+    D3D12_RESOLVE_MODE mode;
+};
+
+struct vkd3d_resolve_image_compute_pipeline_key
+{
+    enum vkd3d_format_type format_type;
+    D3D12_RESOLVE_MODE mode;
+};
+
+struct vkd3d_resolve_image_pipeline_key
+{
+    enum vkd3d_resolve_image_path path;
+    union
+    {
+        struct vkd3d_resolve_image_graphics_pipeline_key graphics;
+        struct vkd3d_resolve_image_compute_pipeline_key compute;
+    };
+};
+
+struct vkd3d_resolve_image_pipeline
+{
+    struct vkd3d_resolve_image_pipeline_key key;
+
+    VkPipeline vk_pipeline;
+};
+
+struct vkd3d_resolve_image_ops
+{
+    VkDescriptorSetLayout vk_graphics_set_layout;
+    VkDescriptorSetLayout vk_compute_set_layout;
+    VkPipelineLayout vk_graphics_pipeline_layout;
+    VkPipelineLayout vk_compute_pipeline_layout;
+    VkShaderModule vk_fs_float_module;
+    VkShaderModule vk_fs_uint_module;
+    VkShaderModule vk_fs_sint_module;
+    VkShaderModule vk_fs_depth_module;
+    VkShaderModule vk_fs_stencil_module;
+
+    pthread_mutex_t mutex;
+
+    struct vkd3d_resolve_image_pipeline *pipelines;
     size_t pipelines_size;
     size_t pipeline_count;
 };
@@ -4064,6 +4183,7 @@ struct vkd3d_meta_ops
     struct vkd3d_meta_ops_common common;
     struct vkd3d_clear_uav_ops clear_uav;
     struct vkd3d_copy_image_ops copy_image;
+    struct vkd3d_resolve_image_ops resolve_image;
     struct vkd3d_swapchain_ops swapchain;
     struct vkd3d_query_ops query;
     struct vkd3d_predicate_ops predicate;
@@ -4094,6 +4214,8 @@ VkImageViewType vkd3d_meta_get_copy_image_view_type(D3D12_RESOURCE_DIMENSION dim
 const struct vkd3d_format *vkd3d_meta_get_copy_image_attachment_format(struct vkd3d_meta_ops *meta_ops,
         const struct vkd3d_format *dst_format, const struct vkd3d_format *src_format,
         VkImageAspectFlags dst_aspect, VkImageAspectFlags src_aspect);
+HRESULT vkd3d_meta_get_resolve_image_pipeline(struct vkd3d_meta_ops *meta_ops,
+        const struct vkd3d_resolve_image_pipeline_key *key, struct vkd3d_resolve_image_info *info);
 HRESULT vkd3d_meta_get_swapchain_pipeline(struct vkd3d_meta_ops *meta_ops,
         const struct vkd3d_swapchain_pipeline_key *key, struct vkd3d_swapchain_info *info);
 
@@ -4809,14 +4931,6 @@ HRESULT d3d12_meta_command_create(struct d3d12_device *device, REFGUID guid,
         const void *parameters, size_t parameter_size, struct d3d12_meta_command **meta_command);
 
 /* utils */
-enum vkd3d_format_type
-{
-    VKD3D_FORMAT_TYPE_OTHER,
-    VKD3D_FORMAT_TYPE_TYPELESS,
-    VKD3D_FORMAT_TYPE_SINT,
-    VKD3D_FORMAT_TYPE_UINT,
-};
-
 struct vkd3d_format_footprint
 {
     DXGI_FORMAT dxgi_format;

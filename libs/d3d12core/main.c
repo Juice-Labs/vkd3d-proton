@@ -32,6 +32,8 @@
 #include "vkd3d_threads.h"
 #include "vkd3d_core_interface.h"
 
+#include "debug.h"
+
 /* We need to specify the __declspec(dllexport) attribute
  * on MinGW because otherwise the stdcall aliases/fixups
  * don't get exported.
@@ -148,9 +150,10 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
     VkPhysicalDeviceProperties2 properties2;
     VkPhysicalDevice *vk_physical_devices;
     VkInstance vk_instance;
-    unsigned int i;
+    unsigned int i, j;
     uint32_t count;
     VkResult vr;
+    bool match;
 
     vk_instance = vkd3d_instance_get_vk_instance(instance);
 
@@ -198,8 +201,33 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
 
         if (id_properties.deviceLUIDValid && !memcmp(id_properties.deviceLUID, &adapter_desc->AdapterLuid, VK_LUID_SIZE))
         {
-            vk_physical_device = vk_physical_devices[i];
-            break;
+            match = true;
+
+            if (vk_physical_device)
+            {
+                WARN("Multiple adapters found with LUID %#x%x.\n", adapter_desc->AdapterLuid.HighPart, adapter_desc->AdapterLuid.LowPart);
+
+                match = properties2.properties.deviceID == adapter_desc->DeviceId &&
+                        properties2.properties.vendorID == adapter_desc->VendorId;
+
+                if (!match)
+                {
+                    /* For simplicity, assume that adapter names are all ASCII characters */
+                    match = true;
+
+                    for (j = 0; j < ARRAY_SIZE(adapter_desc->Description); j++)
+                    {
+                        WCHAR a = (WCHAR)properties2.properties.deviceName[j];
+                        WCHAR b = adapter_desc->Description[j];
+
+                        if (!(match = (a == b)) || !a || !b)
+                          break;
+                    }
+                }
+            }
+
+            if (match)
+                vk_physical_device = vk_physical_devices[i];
         }
     }
 
@@ -370,10 +398,20 @@ HRESULT STDMETHODCALLTYPE d3d12core_SerializeVersionedRootSignature(d3d12core_in
 HRESULT STDMETHODCALLTYPE d3d12core_GetDebugInterface(d3d12core_interface *core,
         REFIID iid, void** debug)
 {
+    ID3D12DeviceRemovedExtendedDataSettings *dred_settings;
+    HRESULT hr;
+
     TRACE("iid %s, debug %p.\n", debugstr_guid(iid), debug);
 
     if (debug)
         *debug = NULL;
+
+    if (!memcmp(iid, &IID_ID3D12DeviceRemovedExtendedDataSettings, sizeof(*iid)))
+    {
+        hr = d3d12_dred_settings_create(&dred_settings);
+        *debug = dred_settings;
+        return hr;
+    }
 
     WARN("Returning DXGI_ERROR_SDK_COMPONENT_MISSING.\n");
     return DXGI_ERROR_SDK_COMPONENT_MISSING;

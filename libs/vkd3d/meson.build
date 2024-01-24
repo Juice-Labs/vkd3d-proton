@@ -41,7 +41,18 @@ vkd3d_shaders =[
   'shaders/fs_sampler_feedback_decode_image_mip_used.frag',
   'shaders/cs_sampler_feedback_encode_buffer_min_mip.comp',
   'shaders/cs_sampler_feedback_encode_image_min_mip.comp',
-  'shaders/cs_sampler_feedback_encode_image_mip_used.comp'
+  'shaders/cs_sampler_feedback_encode_image_mip_used.comp',
+
+  'shaders/fs_resolve_color_float.frag',
+  'shaders/fs_resolve_color_uint.frag',
+  'shaders/fs_resolve_color_sint.frag',
+  'shaders/fs_resolve_depth.frag',
+  'shaders/fs_resolve_stencil.frag',
+  'shaders/fs_resolve_stencil_no_export.frag',
+
+  'shaders/cs_resolve_color_float.comp',
+  'shaders/cs_resolve_color_uint.comp',
+  'shaders/cs_resolve_color_sint.comp',
 ]
 
 vkd3d_src = [
@@ -84,8 +95,7 @@ endif
 
 vkd3d_lib = static_library('vkd3d-proton', vkd3d_src, glsl_generator.process(vkd3d_shaders), vkd3d_build, vkd3d_version,
   dependencies        : [ vkd3d_common_dep, vkd3d_shader_dep ] + vkd3d_extra_libs,
-  include_directories : vkd3d_private_includes,
-  override_options    : [ 'c_std='+vkd3d_c_std ])
+  include_directories : vkd3d_private_includes)
 
 vkd3d_dep = declare_dependency(
   link_with           : [ vkd3d_lib, vkd3d_common_lib ],

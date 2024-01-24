@@ -457,7 +457,6 @@ enum vkd3d_application_feature_override
 {
     VKD3D_APPLICATION_FEATURE_OVERRIDE_NONE = 0,
     VKD3D_APPLICATION_FEATURE_OVERRIDE_PROMOTE_DXR_TO_ULTIMATE,
-    VKD3D_APPLICATION_FEATURE_DISABLE_DGCC_NV,
     VKD3D_APPLICATION_FEATURE_NO_DEFAULT_DXR_ON_DECK,
     VKD3D_APPLICATION_FEATURE_LIMIT_DXR_1_0,
 };
@@ -488,8 +487,7 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     { VKD3D_STRING_COMPARE_EXACT, "HaloInfinite.exe",
             VKD3D_CONFIG_FLAG_ZERO_MEMORY_WORKAROUNDS_COMMITTED_BUFFER_UAV | VKD3D_CONFIG_FLAG_FORCE_RAW_VA_CBV |
             VKD3D_CONFIG_FLAG_USE_HOST_IMPORT_FALLBACK | VKD3D_CONFIG_FLAG_PREALLOCATE_SRV_MIP_CLAMPS |
-            VKD3D_CONFIG_FLAG_REQUIRES_COMPUTE_INDIRECT_TEMPLATES | VKD3D_CONFIG_FLAG_NO_UPLOAD_HVV, 0,
-            VKD3D_APPLICATION_FEATURE_DISABLE_DGCC_NV },
+            VKD3D_CONFIG_FLAG_REQUIRES_COMPUTE_INDIRECT_TEMPLATES | VKD3D_CONFIG_FLAG_NO_UPLOAD_HVV, 0 },
     /* (1182900) Workaround amdgpu kernel bug with host memory import and concurrent submissions. */
     { VKD3D_STRING_COMPARE_EXACT, "APlagueTaleRequiem_x64.exe",
             VKD3D_CONFIG_FLAG_USE_HOST_IMPORT_FALLBACK | VKD3D_CONFIG_FLAG_DISABLE_UAV_COMPRESSION, 0 },
@@ -642,10 +640,15 @@ static const struct vkd3d_shader_quirk_info witcher3_quirks = {
 static const struct vkd3d_shader_quirk_hash cp77_hashes[] = {
     /* Shader accesses descriptor heap out of bounds spuriously, causing GPU hang on RADV. */
     { 0x55540466536c9e11, VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS },
+    { 0x0c3defbf58c47055, VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS },
 };
 
 static const struct vkd3d_shader_quirk_info cp77_quirks = {
     cp77_hashes, ARRAY_SIZE(cp77_hashes), 0,
+};
+
+static const struct vkd3d_shader_quirk_info pagonia_quirks = {
+    NULL, 0, VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS,
 };
 
 static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
@@ -669,6 +672,8 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     { VKD3D_STRING_COMPARE_EXACT, "witcher3.exe", &witcher3_quirks },
     /* Cyberpunk 2077 (1091500). */
     { VKD3D_STRING_COMPARE_EXACT, "Cyberpunk2077.exe", &cp77_quirks },
+    /* Pioneers of Pagonia (2155180) */
+    { VKD3D_STRING_COMPARE_EXACT, "Pioneers of Pagonia.exe", &pagonia_quirks },
     /* Unreal Engine 4 */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Shipping.exe", &ue4_quirks },
     /* MSVC fails to compile empty array. */
@@ -1239,7 +1244,7 @@ UINT d3d12_determine_shading_rate_image_tile_size(struct d3d12_device *device)
     {
         UINT tile_size = valid_shading_rate_image_tile_sizes[i];
         if (tile_size >= min_texel_size.width && tile_size >= min_texel_size.height &&
-                tile_size <= max_texel_size.height && tile_size <= max_texel_size.height)
+                tile_size <= max_texel_size.width && tile_size <= max_texel_size.height)
             return tile_size;
     }
 
@@ -1381,28 +1386,23 @@ static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_d
                 device->vk_info.NV_device_generated_commands_compute)
         {
             bool broken_version_linux, broken_version_windows;
-            /* A lot of drivers were broken until 535.43.15 (Linux) and 537.72 (Windows). */
+            /* A lot of drivers were broken until 535.43.19 (Linux) and 537.96 (Windows). */
             /* The 545-drivers, 545.23.06 and 545.29.02 so far, are also broken on Linux. */
 
             broken_version_linux =
                     VKD3D_DRIVER_VERSION_MAJOR_NV(info->properties2.properties.driverVersion) == 545 ||
                     (info->properties2.properties.driverVersion >= VKD3D_DRIVER_VERSION_MAKE_NV(535, 43, 0) &&
-                        info->properties2.properties.driverVersion < VKD3D_DRIVER_VERSION_MAKE_NV(535, 43, 15));
+                        info->properties2.properties.driverVersion < VKD3D_DRIVER_VERSION_MAKE_NV(535, 43, 19));
 
             broken_version_windows =
                     info->properties2.properties.driverVersion >= VKD3D_DRIVER_VERSION_MAKE_NV(537, 0, 0) &&
-                    info->properties2.properties.driverVersion < VKD3D_DRIVER_VERSION_MAKE_NV(537, 72, 0);
+                    info->properties2.properties.driverVersion < VKD3D_DRIVER_VERSION_MAKE_NV(537, 96, 0);
 
-            if (vkd3d_application_feature_override == VKD3D_APPLICATION_FEATURE_DISABLE_DGCC_NV ||
-                    broken_version_linux || broken_version_windows)
+            if (broken_version_linux || broken_version_windows)
             {
                 device->vk_info.NV_device_generated_commands_compute = false;
                 device->device_info.device_generated_commands_compute_features_nv.deviceGeneratedCompute = VK_FALSE;
-
-                if (vkd3d_application_feature_override == VKD3D_APPLICATION_FEATURE_DISABLE_DGCC_NV)
-                    WARN("Disabling NV_dgcc due to bug in specific game.\n");
-                else
-                    WARN("Disabling NV_dgcc due to bug in driver version.\n");
+                WARN("Disabling NV_dgcc due to bug in driver version.\n");
             }
         }
 
@@ -2913,7 +2913,6 @@ static HRESULT d3d12_device_create_scratch_buffer(struct d3d12_device *device, e
         alloc_info.memory_requirements.memoryTypeBits = memory_types;
         alloc_info.memory_requirements.alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
         alloc_info.heap_flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
-        alloc_info.optional_memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         alloc_info.flags = VKD3D_ALLOCATION_FLAG_GLOBAL_BUFFER | VKD3D_ALLOCATION_FLAG_INTERNAL_SCRATCH;
         alloc_info.vk_memory_priority = vkd3d_convert_to_vk_prio(D3D12_RESIDENCY_PRIORITY_NORMAL);
 
@@ -3543,6 +3542,10 @@ static void vkd3d_determine_format_support_for_feature_level(const struct d3d12_
     {
         format_support->Support2 |= D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD;
     }
+
+    /* Do not report TILED if tiled resource support is disabled */
+    if (!device->d3d12_caps.options.TiledResourcesTier)
+        format_support->Support2 &= ~D3D12_FORMAT_SUPPORT2_TILED;
 }
 
 static HRESULT d3d12_device_check_multisample_quality_levels(struct d3d12_device *device,
@@ -3630,16 +3633,25 @@ bool d3d12_device_is_uma(struct d3d12_device *device, bool *coherent)
 
 static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D12_FEATURE_DATA_FORMAT_SUPPORT *data)
 {
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkPhysicalDeviceImageFormatInfo2 format_info;
+    VkImageFormatProperties2 format_properties;
     VkFormatFeatureFlags2 image_features;
     const struct vkd3d_format *format;
+    VkResult vr;
 
     data->Support1 = D3D12_FORMAT_SUPPORT1_NONE;
     data->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
-    if (data->Format == DXGI_FORMAT_UNKNOWN)
+
+    if (!data->Format)
     {
         data->Support1 = D3D12_FORMAT_SUPPORT1_BUFFER;
+
+        if (device->device_info.features2.features.sparseResidencyBuffer)
+            data->Support2 = D3D12_FORMAT_SUPPORT2_TILED;
         return S_OK;
     }
+
     if (!(format = vkd3d_get_format(device, data->Format, false)))
         format = vkd3d_get_format(device, data->Format, true);
     if (!format)
@@ -3710,6 +3722,36 @@ static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D1
                 | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE
                 | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_SIGNED_MIN_OR_MAX
                 | D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX;
+    }
+
+    if (!format->is_emulated)
+    {
+        if ((image_features & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) && 
+                device->device_info.features2.features.sparseResidencyImage2D)
+        {
+            memset(&format_info, 0, sizeof(format_info));
+            format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+            format_info.type = VK_IMAGE_TYPE_2D;
+            format_info.format = format->vk_format;
+            format_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+            format_info.flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                    VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                    VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
+            format_info.tiling = format->vk_image_tiling;
+
+            memset(&format_properties, 0, sizeof(format_properties));
+            format_properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+
+            vr = VK_CALL(vkGetPhysicalDeviceImageFormatProperties2(
+              device->vk_physical_device, &format_info, &format_properties));
+
+            if (vr == VK_SUCCESS)
+                data->Support2 |= D3D12_FORMAT_SUPPORT2_TILED;
+        }
+
+        if (!image_features && format->vk_format_features_buffer &&
+                device->device_info.features2.features.sparseResidencyBuffer)
+            data->Support2 |= D3D12_FORMAT_SUPPORT2_TILED;
     }
 
     return S_OK;
@@ -7572,9 +7614,7 @@ static void d3d12_device_caps_init_feature_options17(struct d3d12_device *device
 static void d3d12_device_caps_init_feature_options18(struct d3d12_device *device)
 {
     D3D12_FEATURE_DATA_D3D12_OPTIONS18 *options18 = &device->d3d12_caps.options18;
-
-    /* We don't currently support render passes at all */
-    options18->RenderPassesValid = FALSE;
+    options18->RenderPassesValid = TRUE;
 }
 
 static void d3d12_device_caps_init_feature_options19(struct d3d12_device *device)

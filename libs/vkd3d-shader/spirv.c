@@ -10739,13 +10739,15 @@ static void vkd3d_dxbc_compiler_emit_bufinfo(struct vkd3d_dxbc_compiler *compile
 static void vkd3d_dxbc_compiler_emit_resinfo(struct vkd3d_dxbc_compiler *compiler,
         const struct vkd3d_shader_instruction *instruction)
 {
+    uint32_t type_id, lod_id, val_id, one_id, rcp_id, cond_id, rcp_type_id, miplevel_count_id;
     struct vkd3d_spirv_builder *builder = &compiler->spirv_builder;
     const struct vkd3d_shader_dst_param *dst = instruction->dst;
     const struct vkd3d_shader_src_param *src = instruction->src;
-    uint32_t type_id, lod_id, val_id, miplevel_count_id;
     uint32_t constituents[VKD3D_VEC4_SIZE];
     unsigned int i, size_component_count;
+    uint32_t indices[VKD3D_VEC4_SIZE];
     struct vkd3d_shader_image image;
+    uint32_t resinfo_type;
     bool supports_mipmaps;
 
     vkd3d_spirv_enable_capability(builder, SpvCapabilityImageQuery);
@@ -10761,8 +10763,16 @@ static void vkd3d_dxbc_compiler_emit_resinfo(struct vkd3d_dxbc_compiler *compile
     {
         lod_id = vkd3d_dxbc_compiler_emit_load_src(compiler, &src[0], VKD3DSP_WRITEMASK_0);
         val_id = vkd3d_spirv_build_op_image_query_size_lod(builder, type_id, image.image_id, lod_id);
-        type_id = vkd3d_spirv_get_type_id(builder, VKD3D_TYPE_UINT, 1);
-        miplevel_count_id = vkd3d_spirv_build_op_image_query_levels(builder, type_id, image.image_id);
+
+        miplevel_count_id = vkd3d_spirv_build_op_image_query_levels(builder,
+                vkd3d_spirv_get_type_id(builder, VKD3D_TYPE_UINT, 1), image.image_id);
+
+        cond_id = vkd3d_spirv_build_op_uless_than(builder,
+                vkd3d_spirv_get_type_id(builder, VKD3D_TYPE_BOOL, 1),
+                lod_id, miplevel_count_id);
+
+        val_id = vkd3d_spirv_build_op_select(builder, type_id, cond_id, val_id,
+                vkd3d_dxbc_compiler_get_constant_uint_vector(compiler, 0, size_component_count));
     }
     else
     {
@@ -10779,16 +10789,41 @@ static void vkd3d_dxbc_compiler_emit_resinfo(struct vkd3d_dxbc_compiler *compile
     val_id = vkd3d_spirv_build_op_composite_construct(builder,
             type_id, constituents, i + 2);
 
+    resinfo_type = instruction->flags & VKD3DSI_RESINFO_MASK;
+
     type_id = vkd3d_spirv_get_type_id(builder, VKD3D_TYPE_FLOAT, VKD3D_VEC4_SIZE);
-    if (instruction->flags == VKD3DSI_RESINFO_UINT)
+    if (resinfo_type == VKD3DSI_RESINFO_UINT)
     {
         val_id = vkd3d_spirv_build_op_bitcast(builder, type_id, val_id);
     }
     else
     {
-        if (instruction->flags)
-            FIXME("Unhandled flags %#x.\n", instruction->flags);
         val_id = vkd3d_spirv_build_op_convert_utof(builder, type_id, val_id);
+
+        if (resinfo_type == VKD3DSI_RESINFO_RCP_FLOAT)
+        {
+            /* The rcp_float flag only applies to the width, height and
+             * depth, but not to the array size or any zeroed component. */
+            if (image.resource_type_info->arrayed)
+                size_component_count -= 1;
+
+            rcp_type_id = vkd3d_spirv_get_type_id(builder, VKD3D_TYPE_FLOAT, size_component_count);
+
+            for (i = 0; i < size_component_count; i++)
+                indices[i] = i;
+
+            rcp_id = vkd3d_spirv_build_op_vector_shuffle(builder, rcp_type_id,
+                    val_id, val_id, indices, size_component_count);
+
+            one_id = vkd3d_dxbc_compiler_get_constant_float_vector(compiler, 1.0f, size_component_count);
+            rcp_id = vkd3d_spirv_build_op_fdiv(builder, rcp_type_id, one_id, rcp_id);
+
+            for (i = 0; i < VKD3D_VEC4_SIZE; i++)
+                indices[i] = (i < size_component_count ? VKD3D_VEC4_SIZE : 0) + i;
+
+            val_id = vkd3d_spirv_build_op_vector_shuffle(builder, type_id,
+                    val_id, rcp_id, indices, VKD3D_VEC4_SIZE);
+        }
     }
     val_id = vkd3d_dxbc_compiler_emit_swizzle(compiler,
             val_id, VKD3DSP_WRITEMASK_ALL, VKD3D_TYPE_FLOAT, src[1].swizzle, dst->write_mask);
@@ -11675,11 +11710,25 @@ void vkd3d_dxbc_compiler_destroy(struct vkd3d_dxbc_compiler *compiler)
 void vkd3d_shader_extract_feature_meta(struct vkd3d_shader_code *code)
 {
     size_t spirv_words = code->size / sizeof(uint32_t);
+    unsigned int i, tracked_builtin_count = 0;
     const uint32_t *spirv = code->code;
     SpvExecutionMode execution_mode;
+    SpvStorageClass storage_class;
     SpvCapability capability;
+    SpvDecoration decoration;
+    SpvBuiltIn builtin;
     size_t offset = 5;
     uint32_t meta = 0;
+    uint32_t var_id;
+
+    /* This array must be large enough to hold all variable IDs that may
+     * be decorated with relevant built-ins in a valid SPIR-V module */
+    struct vkd3d_tracked_builtin
+    {
+        uint32_t var_id;
+        SpvBuiltIn builtin;
+    }
+    tracked_builtins[2];
 
     while (offset < spirv_words)
     {
@@ -11777,6 +11826,56 @@ void vkd3d_shader_extract_feature_meta(struct vkd3d_shader_code *code)
                     execution_mode == SpvExecutionModeOutputTrianglesEXT)
                 meta |= VKD3D_SHADER_META_FLAG_EMITS_TRIANGLES;
 
+        }
+        else if ((op == SpvOpDecorate && count == 4) ||
+                (op == SpvOpMemberDecorate && count == 5))
+        {
+            unsigned int delta = op == SpvOpMemberDecorate ? 1 : 0;
+            decoration = spirv[offset + delta + 2];
+
+            if (decoration == SpvDecorationBuiltIn)
+            {
+                builtin = spirv[offset + delta + 3];
+
+                if (builtin == SpvBuiltInSampleMask)
+                {
+                    if (tracked_builtin_count < ARRAY_SIZE(tracked_builtins))
+                    {
+                        struct vkd3d_tracked_builtin *entry = &tracked_builtins[tracked_builtin_count++];
+                        entry->var_id = spirv[offset + 1];
+                        entry->builtin = builtin;
+                    }
+                    else
+                        ERR("Too many tracked built-in variables.\n");
+                }
+            }
+        }
+        else if (op == SpvOpVariable && count >= 4)
+        {
+            storage_class = spirv[offset + 3];
+
+            if (storage_class == SpvStorageClassOutput || storage_class == SpvStorageClassInput)
+            {
+                var_id = spirv[offset + 2];
+
+                for (i = 0; i < tracked_builtin_count; i++)
+                {
+                    const struct vkd3d_tracked_builtin *entry = &tracked_builtins[i];
+
+                    if (entry->var_id != var_id)
+                        continue;
+
+                    switch (entry->builtin)
+                    {
+                        case SpvBuiltInSampleMask:
+                            if (storage_class == SpvStorageClassOutput)
+                                meta |= VKD3D_SHADER_META_FLAG_EXPORTS_SAMPLE_MASK;
+                            break;
+
+                        default:;
+                    }
+                }
+            }
         }
         else if (op == SpvOpFunction)
         {
