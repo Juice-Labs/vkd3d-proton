@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#if 0
 #ifdef VKD3D_NO_TRACE_MESSAGES
 #define TRACE(...) do { } while (0)
 #define TRACE_ON() (false)
@@ -33,6 +34,7 @@
 #ifdef VKD3D_NO_DEBUG_MESSAGES
 #define WARN(...) do { } while (0)
 #define FIXME(...) do { } while (0)
+#endif
 #endif
 
 enum vkd3d_dbg_level

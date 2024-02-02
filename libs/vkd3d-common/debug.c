@@ -143,10 +143,7 @@ static inline void vkd3d_dbg_init(void)
 enum vkd3d_dbg_level vkd3d_dbg_get_level(enum vkd3d_dbg_channel channel)
 {
     vkd3d_dbg_init();
-    if (channel >= VKD3D_DBG_CHANNEL_COUNT)
-        return VKD3D_DBG_LEVEL_FIXME;
-    assert(vkd3d_dbg_level[channel] != VKD3D_DBG_LEVEL_UNKNOWN);
-    return vkd3d_dbg_level[channel];
+    return VKD3D_DBG_LEVEL_TRACE;
 }
 
 void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level, const char *function, const char *fmt, ...)
