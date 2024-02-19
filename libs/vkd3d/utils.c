@@ -920,9 +920,7 @@ bool is_valid_format(DXGI_FORMAT dxgi_format)
 {
     if (dxgi_format >= DXGI_FORMAT_UNKNOWN && dxgi_format <= DXGI_FORMAT_B4G4R4A4_UNORM)
         return true;
-    if (dxgi_format >= DXGI_FORMAT_P208 && dxgi_format <= DXGI_FORMAT_V408)
-        return true;
-    if (dxgi_format >= DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE && dxgi_format <= DXGI_FORMAT_A4B4G4R4_UNORM)
+    if (dxgi_format >= DXGI_FORMAT_P208 && dxgi_format <= DXGI_FORMAT_A4B4G4R4_UNORM)
         return true;
     return false;
 }
