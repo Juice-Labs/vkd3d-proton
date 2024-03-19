@@ -274,6 +274,9 @@ VK_DEVICE_EXT_PFN(vkCmdEndTransformFeedbackEXT)
 /* VK_EXT_extended_dynamic_state2 */
 VK_DEVICE_EXT_PFN(vkCmdSetPatchControlPointsEXT)
 
+/* VK_EXT_extended_dynamic_state3 */
+VK_DEVICE_EXT_PFN(vkCmdSetRasterizationSamplesEXT)
+
 /* VK_EXT_external_memory_host */
 VK_DEVICE_EXT_PFN(vkGetMemoryHostPointerPropertiesEXT)
 
@@ -291,6 +294,9 @@ VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceSupportKHR)
 VK_INSTANCE_EXT_PFN(vkDestroySurfaceKHR)
 VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceFormatsKHR)
 VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
+
+/* VK_KHR_get_surface_capabilities2 */
+VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceCapabilities2KHR)
 
 /* VK_KHR_win32_surface */
 #ifdef VK_KHR_win32_surface
@@ -365,6 +371,16 @@ VK_DEVICE_EXT_PFN(vkSetDeviceMemoryPriorityEXT)
 /* VK_NV_memory_decompression */
 VK_DEVICE_EXT_PFN(vkCmdDecompressMemoryNV)
 VK_DEVICE_EXT_PFN(vkCmdDecompressMemoryIndirectCountNV)
+
+/* VK_EXT_device_fault */
+VK_DEVICE_EXT_PFN(vkGetDeviceFaultInfoEXT)
+
+/* VK_NV_low_latency2 */
+VK_DEVICE_EXT_PFN(vkSetLatencySleepModeNV)
+VK_DEVICE_EXT_PFN(vkLatencySleepNV)
+VK_DEVICE_EXT_PFN(vkSetLatencyMarkerNV)
+VK_DEVICE_EXT_PFN(vkGetLatencyTimingsNV)
+VK_DEVICE_EXT_PFN(vkQueueNotifyOutOfBandNV)
 
 #undef VK_INSTANCE_PFN
 #undef VK_INSTANCE_EXT_PFN

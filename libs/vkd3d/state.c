@@ -1568,7 +1568,8 @@ HRESULT d3d12_root_signature_create_empty(struct d3d12_device *device,
 
     /* For pipeline libraries, (and later DXR to some degree), we need a way to
      * compare root signature objects. */
-    object->compatibility_hash = 0;
+    object->pso_compatibility_hash = 0;
+    object->layout_compatibility_hash = 0;
 
     if (FAILED(hr))
     {
@@ -1597,7 +1598,7 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
 
     if (raw_payload)
     {
-        if ((ret = vkd3d_parse_root_signature_v_1_2_from_raw_payload(&dxbc, &root_signature_desc.vkd3d,
+        if ((ret = vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(&dxbc, &root_signature_desc.vkd3d,
                 &compatibility_hash)))
         {
             WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
@@ -1606,7 +1607,7 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
     }
     else
     {
-        if ((ret = vkd3d_parse_root_signature_v_1_2(&dxbc, &root_signature_desc.vkd3d, &compatibility_hash)) < 0)
+        if ((ret = vkd3d_shader_parse_root_signature_v_1_2(&dxbc, &root_signature_desc.vkd3d, &compatibility_hash)) < 0)
         {
             WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
             return hresult_from_vkd3d_result(ret);
@@ -1623,7 +1624,9 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
 
     /* For pipeline libraries, (and later DXR to some degree), we need a way to
      * compare root signature objects. */
-    object->compatibility_hash = compatibility_hash;
+    object->pso_compatibility_hash = compatibility_hash;
+    object->layout_compatibility_hash = vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+            &root_signature_desc.vkd3d.v_1_2);
 
     vkd3d_shader_free_root_signature(&root_signature_desc.vkd3d);
     if (FAILED(hr))
@@ -2882,7 +2885,9 @@ static HRESULT vkd3d_create_compute_pipeline(struct d3d12_pipeline_state *state,
     VK_CALL(vkDestroyShaderModule(device->vk_device, pipeline_info.stage.module, NULL));
     if (vr < 0)
     {
-        WARN("Failed to create Vulkan compute pipeline, hr %#x.", hr);
+        ERR("Failed to create Vulkan compute pipeline, hr %#x.", hr);
+        ERR("  Root signature: %"PRIx64"\n", state->root_signature->pso_compatibility_hash);
+        ERR("  Shader: %"PRIx64".\n", state->compute.code.meta.hash);
         return hresult_from_vk_result(vr);
     }
 
@@ -3637,6 +3642,7 @@ vkd3d_dynamic_state_list[] =
     { VKD3D_DYNAMIC_STATE_STENCIL_WRITE_MASK,    VK_DYNAMIC_STATE_STENCIL_WRITE_MASK },
     { VKD3D_DYNAMIC_STATE_DEPTH_BIAS,            VK_DYNAMIC_STATE_DEPTH_BIAS },
     { VKD3D_DYNAMIC_STATE_DEPTH_BIAS,            VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE },
+    { VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES, VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT },
 };
 
 uint32_t vkd3d_init_dynamic_state_array(VkDynamicState *dynamic_states, uint32_t dynamic_state_flags)
@@ -3867,7 +3873,7 @@ VkPipeline vkd3d_fragment_output_pipeline_create(struct d3d12_device *device,
     if ((vr = VK_CALL(vkCreateGraphicsPipelines(device->vk_device,
             VK_NULL_HANDLE, 1, &create_info, NULL, &vk_pipeline))))
     {
-        ERR("Failed to create vertex input pipeline, vr %d.\n", vr);
+        ERR("Failed to create fragment output pipeline, vr %d.\n", vr);
         return VK_NULL_HANDLE;
     }
 
@@ -3883,6 +3889,16 @@ void vkd3d_fragment_output_pipeline_free(struct hash_map_entry *entry, void *use
     vk_procs = &device->vk_procs;
 
     VK_CALL(vkDestroyPipeline(device->vk_device, pipeline->vk_pipeline, NULL));
+}
+
+static bool d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(const struct d3d12_graphics_pipeline_state *graphics)
+{
+    /* Ignore the case where the pipeline is compiled for a single sample since Vulkan drivers are robust against that. */
+    if (graphics->rs_desc.rasterizerDiscardEnable || graphics->ms_desc.rasterizationSamples == VK_SAMPLE_COUNT_1_BIT)
+        return false;
+
+    return graphics->rtv_active_mask || graphics->dsv_format ||
+            (graphics->null_attachment_mask & dsv_attachment_mask(graphics));
 }
 
 uint32_t d3d12_graphics_pipeline_state_get_dynamic_state_flags(struct d3d12_pipeline_state *state,
@@ -3953,6 +3969,12 @@ uint32_t d3d12_graphics_pipeline_state_get_dynamic_state_flags(struct d3d12_pipe
 
     if (graphics->index_buffer_strip_cut_value && !is_mesh_pipeline)
         dynamic_state_flags |= VKD3D_DYNAMIC_STATE_PRIMITIVE_RESTART;
+
+    /* Enable dynamic sample count for multisampled pipelines so we can work around
+     * bugs where the app may render to a single sampled render target. */
+    if (d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(&state->graphics) &&
+            state->device->device_info.extended_dynamic_state3_features.extendedDynamicState3RasterizationSamples)
+        dynamic_state_flags |= VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES;
 
     return dynamic_state_flags;
 }
@@ -4181,18 +4203,205 @@ static void d3d12_pipeline_state_graphics_handle_meta(struct d3d12_pipeline_stat
         vk_prepend_struct(&graphics->rs_desc, &graphics->rs_line_info);
 }
 
+static bool vkd3d_shader_semantic_is_generated_for_stage(enum vkd3d_sysval_semantic sv,
+        VkShaderStageFlagBits prev_stage, VkShaderStageFlagBits curr_stage)
+{
+    switch (sv)
+    {
+        case VKD3D_SV_NONE:
+        case VKD3D_SV_POSITION:
+        case VKD3D_SV_CLIP_DISTANCE:
+        case VKD3D_SV_CULL_DISTANCE:
+        case VKD3D_SV_RENDER_TARGET_ARRAY_INDEX:
+        case VKD3D_SV_VIEWPORT_ARRAY_INDEX:
+        case VKD3D_SV_TESS_FACTOR_QUADEDGE:
+        case VKD3D_SV_TESS_FACTOR_QUADINT:
+        case VKD3D_SV_TESS_FACTOR_TRIEDGE:
+        case VKD3D_SV_TESS_FACTOR_TRIINT:
+        case VKD3D_SV_TESS_FACTOR_LINEDET:
+        case VKD3D_SV_TESS_FACTOR_LINEDEN:
+            return false;
+
+        case VKD3D_SV_VERTEX_ID:
+        case VKD3D_SV_INSTANCE_ID:
+            return curr_stage == VK_SHADER_STAGE_VERTEX_BIT;
+
+        case VKD3D_SV_PRIMITIVE_ID:
+            return prev_stage == VK_SHADER_STAGE_VERTEX_BIT;
+
+        case VKD3D_SV_IS_FRONT_FACE:
+        case VKD3D_SV_SAMPLE_INDEX:
+        case VKD3D_SV_BARYCENTRICS:
+        case VKD3D_SV_SHADING_RATE:
+            return curr_stage == VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        default:
+            FIXME("Unhandled system value %u.\n", sv);
+            return false;
+    }
+}
+
+static bool vkd3d_validate_shader_io_signatures(VkShaderStageFlagBits output_stage,
+        const struct vkd3d_shader_signature *out_sig, VkShaderStageFlagBits input_stage,
+        const struct vkd3d_shader_signature *in_sig)
+{
+    const struct vkd3d_shader_signature_element *in_element, *out_element;
+    unsigned int i;
+    bool mismatch;
+
+    /* D3D12 does not appear to take the rasterized stream index from the pipeline
+     * into account for interface matching, so only stream 0 works in practice. */
+    for (i = 0; i < in_sig->element_count; i++)
+    {
+        in_element = &in_sig->elements[i];
+
+        out_element = vkd3d_shader_find_signature_element(out_sig, in_element->semantic_name,
+                in_element->semantic_index, in_element->stream_index);
+
+        if (!out_element)
+        {
+            /* Some system values may or may not be provided by the previous stage, such as
+             * SV_PrimitiveID in pixel shaders. Accept the input being provided, but if provided
+             * by the previous stage, the register and component indices must match. */
+            if (vkd3d_shader_semantic_is_generated_for_stage(in_element->sysval_semantic, output_stage, input_stage))
+                continue;
+
+            WARN("No corresponding output signature element found for %s%u.\n",
+                    in_element->semantic_name, in_element->semantic_index);
+            return false;
+        }
+
+        mismatch = in_element->register_index != out_element->register_index ||
+                in_element->component_type != out_element->component_type ||
+                in_element->min_precision != out_element->min_precision;
+
+        if (input_stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+        {
+            /* For tessellation shaders, the component count must match exactly. */
+            mismatch = mismatch || ((in_element->mask & 0xf) != (out_element->mask & 0xf));
+        }
+        else
+        {
+            /* Otherwise, it is legal to consume only a subset of components provided by the
+             * previous stage, but consuming components not provided by the previous stage is not. */
+            mismatch = mismatch || !!(in_element->mask & ~out_element->mask & 0xf);
+        }
+
+        if (mismatch)
+        {
+            WARN("Input signature element %s%u (reg %u, mask %#x) not compatible with %s%u (reg %u, mask %#x).\n",
+                    in_element->semantic_name, in_element->semantic_index, in_element->register_index, in_element->mask & 0xf,
+                    out_element->semantic_name, out_element->semantic_index, out_element->register_index, out_element->mask & 0xf);
+            return false;
+        }
+    }
+
+    /* The domain shader must consume all hull shader outputs, including
+     * tessellation factors. */
+    if (input_stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+    {
+        for (i = 0; i < out_sig->element_count; i++)
+        {
+            out_element = &out_sig->elements[i];
+
+            if (!vkd3d_shader_find_signature_element(in_sig, out_element->semantic_name,
+                    out_element->semantic_index, out_element->stream_index))
+            {
+                WARN("Hull shader output %s%u not consumed by domain shader.\n",
+                        out_element->semantic_name, out_element->semantic_index);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool vkd3d_validate_mesh_shader_io_signatures(const struct vkd3d_shader_signature *vert_sig,
+        const struct vkd3d_shader_signature *prim_sig, const struct vkd3d_shader_signature *in_sig)
+{
+    const struct vkd3d_shader_signature_element *in_element, *out_element;
+    unsigned int i;
+    bool mismatch;
+
+    for (i = 0; i < in_sig->element_count; i++)
+    {
+        in_element = &in_sig->elements[i];
+
+        if (!(out_element = vkd3d_shader_find_signature_element(vert_sig, in_element->semantic_name, in_element->semantic_index, 0)) &&
+                !(out_element = vkd3d_shader_find_signature_element(prim_sig, in_element->semantic_name, in_element->semantic_index, 0)))
+        {
+            if (vkd3d_shader_semantic_is_generated_for_stage(in_element->sysval_semantic, VK_SHADER_STAGE_MESH_BIT_EXT, VK_SHADER_STAGE_FRAGMENT_BIT))
+                continue;
+
+            WARN("No corresponding output signature element found for %s%u.\n",
+                    in_element->semantic_name, in_element->semantic_index);
+            return false;
+        }
+
+        mismatch = in_element->component_type != out_element->component_type ||
+                vkd3d_popcount(in_element->mask & 0xf) != vkd3d_popcount(out_element->mask & 0xf) ||
+                in_element->min_precision != out_element->min_precision;
+
+        if (mismatch)
+        {
+            WARN("Input signature element %s%u (reg %u, mask %#x) not compatible with %s%u (reg %u, mask %#x).\n",
+                    in_element->semantic_name, in_element->semantic_index, in_element->register_index, in_element->mask & 0xf,
+                    out_element->semantic_name, out_element->semantic_index, out_element->register_index, out_element->mask & 0xf);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool vkd3d_validate_vertex_input_signature(const struct vkd3d_shader_signature *sig, const D3D12_INPUT_LAYOUT_DESC *input_layout)
+{
+    unsigned int i, j;
+    bool found;
+
+    for (i = 0; i < sig->element_count; i++)
+    {
+        const struct vkd3d_shader_signature_element *e = &sig->elements[i];
+
+        if (vkd3d_shader_semantic_is_generated_for_stage(e->sysval_semantic, VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM, VK_SHADER_STAGE_VERTEX_BIT))
+            continue;
+
+        found = false;
+
+        for (j = 0; j < input_layout->NumElements; j++)
+        {
+            if (!ascii_strcasecmp(e->semantic_name, input_layout->pInputElementDescs[j].SemanticName) &&
+                    e->semantic_index == input_layout->pInputElementDescs[j].SemanticIndex)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            WARN("No input layout element found for VS input semantic %s%u.\n", e->semantic_name, e->semantic_index);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipeline_state *state,
         struct d3d12_device *device, const struct d3d12_pipeline_state_desc *desc)
 {
+    struct vkd3d_shader_signature vs_input_signature, pc_input_signature, io_input_signature;
     const VkPhysicalDeviceFeatures *features = &device->device_info.features2.features;
+    struct vkd3d_shader_signature pc_output_signature, io_output_signature;
     struct d3d12_graphics_pipeline_state *graphics = &state->graphics;
     const D3D12_STREAM_OUTPUT_DESC *so_desc = &desc->stream_output;
     VkVertexInputBindingDivisorDescriptionEXT *binding_divisor;
     const struct vkd3d_vulkan_info *vk_info = &device->vk_info;
     uint32_t instance_divisors[D3D12_VS_INPUT_REGISTER_COUNT];
     uint32_t aligned_offsets[D3D12_VS_INPUT_REGISTER_COUNT];
-    struct vkd3d_shader_signature output_signature;
-    struct vkd3d_shader_signature input_signature;
+    VkShaderStageFlagBits curr_stage, prev_stage;
     VkSampleCountFlagBits sample_count;
     const struct vkd3d_format *format;
     unsigned int instance_divisor;
@@ -4231,8 +4440,7 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
             ? VKD3D_PIPELINE_TYPE_MESH_GRAPHICS
             : VKD3D_PIPELINE_TYPE_GRAPHICS;
 
-    memset(&input_signature, 0, sizeof(input_signature));
-    memset(&output_signature, 0, sizeof(output_signature));
+    memset(&vs_input_signature, 0, sizeof(vs_input_signature));
 
     for (i = desc->rtv_formats.NumRenderTargets; i < ARRAY_SIZE(desc->rtv_formats.RTFormats); ++i)
     {
@@ -4440,6 +4648,12 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
     graphics->patch_vertex_count = 0;
 
     /* Parse interface data from DXBC blobs. */
+    memset(&pc_input_signature, 0, sizeof(pc_input_signature));
+    memset(&pc_output_signature, 0, sizeof(pc_output_signature));
+    memset(&io_output_signature, 0, sizeof(io_output_signature));
+
+    curr_stage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
+
     for (i = 0; i < ARRAY_SIZE(shader_stages_lut); ++i)
     {
         const D3D12_SHADER_BYTECODE *b = (const void *)((uintptr_t)desc + shader_stages_lut[i].offset);
@@ -4448,12 +4662,75 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
         if (!(graphics->stage_flags & shader_stages_lut[i].stage))
             continue;
 
+        prev_stage = curr_stage;
+        curr_stage = shader_stages_lut[i].stage;
+
+        memset(&io_input_signature, 0, sizeof(io_input_signature));
+
+        /* Ignore errors when a signature is not present. If a missing signature
+         * leads to compatibility issues, validation will fail later anyway. */
+        if (curr_stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT ||
+                curr_stage == VK_SHADER_STAGE_MESH_BIT_EXT)
+            vkd3d_shader_parse_patch_constant_signature(&dxbc, &pc_output_signature);
+
+        if (curr_stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+        {
+            vkd3d_shader_parse_patch_constant_signature(&dxbc, &pc_input_signature);
+
+            if (!vkd3d_validate_shader_io_signatures(prev_stage, &pc_output_signature, curr_stage, &pc_input_signature))
+            {
+                hr = E_INVALIDARG;
+                goto fail;
+            }
+        }
+
+        if (curr_stage != VK_SHADER_STAGE_VERTEX_BIT &&
+                curr_stage != VK_SHADER_STAGE_TASK_BIT_EXT &&
+                curr_stage != VK_SHADER_STAGE_MESH_BIT_EXT)
+        {
+            vkd3d_shader_parse_input_signature(&dxbc, &io_input_signature);
+
+            if (state->pipeline_type == VKD3D_PIPELINE_TYPE_MESH_GRAPHICS)
+            {
+                /* Mesh shaders are special since register assignment is based on semantics. */
+                if (!vkd3d_validate_mesh_shader_io_signatures(&io_output_signature, &pc_output_signature, &io_input_signature))
+                {
+                    hr = E_INVALIDARG;
+                    goto fail;
+                }
+            }
+            else
+            {
+                if (!vkd3d_validate_shader_io_signatures(prev_stage,
+                        &io_output_signature, curr_stage, &io_input_signature))
+                {
+                    hr = E_INVALIDARG;
+                    goto fail;
+                }
+            }
+        }
+
+        vkd3d_shader_free_shader_signature(&io_input_signature);
+        vkd3d_shader_free_shader_signature(&io_output_signature);
+
+        memset(&io_output_signature, 0, sizeof(io_output_signature));
+
+        /* Read output signature for validation purposes. */
+        if (shader_stages_lut[i].stage != VK_SHADER_STAGE_TASK_BIT_EXT)
+            vkd3d_shader_parse_output_signature(&dxbc, &io_output_signature);
+
         switch (shader_stages_lut[i].stage)
         {
             case VK_SHADER_STAGE_VERTEX_BIT:
-                if ((ret = vkd3d_shader_parse_input_signature(&dxbc, &input_signature)) < 0)
+                if ((ret = vkd3d_shader_parse_input_signature(&dxbc, &vs_input_signature)) < 0)
                 {
                     hr = hresult_from_vkd3d_result(ret);
+                    goto fail;
+                }
+
+                if (!vkd3d_validate_vertex_input_signature(&vs_input_signature, &desc->input_layout))
+                {
+                    hr = E_INVALIDARG;
                     goto fail;
                 }
                 break;
@@ -4474,13 +4751,7 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
                 break;
 
             case VK_SHADER_STAGE_FRAGMENT_BIT:
-                if ((ret = vkd3d_shader_parse_output_signature(&dxbc, &output_signature)) < 0)
-                {
-                    hr = hresult_from_vkd3d_result(ret);
-                    goto fail;
-                }
-
-                if (FAILED(hr = d3d12_pipeline_state_validate_blend_state(state, device, desc, &output_signature)))
+                if (FAILED(hr = d3d12_pipeline_state_validate_blend_state(state, device, desc, &io_output_signature)))
                     goto fail;
                 break;
 
@@ -4496,6 +4767,10 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
 
         ++graphics->stage_count;
     }
+
+    vkd3d_shader_free_shader_signature(&pc_input_signature);
+    vkd3d_shader_free_shader_signature(&pc_output_signature);
+    vkd3d_shader_free_shader_signature(&io_output_signature);
 
     graphics->attribute_count = (graphics->stage_flags & VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT)
             ? 0 : desc->input_layout.NumElements;
@@ -4543,12 +4818,9 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
             goto fail;
         }
 
-        if (!(signature_element = vkd3d_shader_find_signature_element(&input_signature,
+        if (!(signature_element = vkd3d_shader_find_signature_element(&vs_input_signature,
                 e->SemanticName, e->SemanticIndex, 0)))
-        {
-            WARN("Unused input element %u.\n", i);
             continue;
-        }
 
         graphics->attributes[j].location = signature_element->register_index;
         graphics->attributes[j].binding = e->InputSlot;
@@ -4621,8 +4893,7 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
     }
     graphics->attribute_count = j;
     graphics->vertex_buffer_mask = mask;
-    vkd3d_shader_free_shader_signature(&input_signature);
-    vkd3d_shader_free_shader_signature(&output_signature);
+    vkd3d_shader_free_shader_signature(&vs_input_signature);
 
     for (i = 0; i < D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; i++)
     {
@@ -4704,8 +4975,7 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
     return S_OK;
 
 fail:
-    vkd3d_shader_free_shader_signature(&input_signature);
-    vkd3d_shader_free_shader_signature(&output_signature);
+    vkd3d_shader_free_shader_signature(&vs_input_signature);
     return hr;
 }
 
@@ -4825,6 +5095,11 @@ static HRESULT d3d12_pipeline_state_finish_graphics(struct d3d12_pipeline_state 
             !(graphics->pipeline_dynamic_states & VKD3D_DYNAMIC_STATE_PATCH_CONTROL_POINTS))
         state->pso_is_fully_dynamic = false;
 
+    /* Same thing if the pipeline is multisampled but we cannot dynamically set the sample count. */
+    if (d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(graphics) &&
+            !(graphics->pipeline_dynamic_states & VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES))
+        state->pso_is_fully_dynamic = false;
+
     if (!state->pso_is_fully_dynamic)
     {
         /* If we got here successfully without SPIR-V code,
@@ -4939,7 +5214,7 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
 
     vkd3d_pipeline_cache_compat_from_state_desc(&object->pipeline_cache_compat, desc);
     if (object->root_signature)
-        object->pipeline_cache_compat.root_signature_compat_hash = object->root_signature->compatibility_hash;
+        object->pipeline_cache_compat.root_signature_compat_hash = object->root_signature->pso_compatibility_hash;
 
     desc_cached_pso = &desc->cached_pso;
 
@@ -5170,6 +5445,106 @@ static bool d3d12_pipeline_state_put_pipeline_to_cache(struct d3d12_pipeline_sta
     return compiled_pipeline;
 }
 
+static void d3d12_pipeline_state_log_graphics_state(const struct d3d12_pipeline_state *state)
+{
+    const struct d3d12_graphics_pipeline_state *graphics = &state->graphics;
+    unsigned int i, j;
+    uint32_t divisor;
+
+    ERR("Root signature: %"PRIx64"\n", state->root_signature->pso_compatibility_hash);
+
+    for (i = 0; i < graphics->stage_count; i++)
+        ERR("Shader %#x: %"PRIx64"\n", graphics->stages[i].stage, graphics->code[i].meta.hash);
+
+    if (graphics->stage_flags & VK_SHADER_STAGE_VERTEX_BIT)
+    {
+        ERR("Topology: %u (patch vertex count: %u)\n", graphics->primitive_topology_type, graphics->patch_vertex_count);
+        ERR("Vertex attributes: %u\n", graphics->attribute_count);
+        for (i = 0; i < graphics->attribute_count; i++)
+        {
+            const VkVertexInputAttributeDescription *attr = &graphics->attributes[i];
+            ERR("  %u: binding %u, format %u, location %u, offset %u\n", attr->binding, attr->format, attr->location, attr->offset);
+        }
+
+        ERR("Vertex bindings: %u.\n", graphics->attribute_binding_count);
+        for (i = 0; i < graphics->attribute_binding_count; i++)
+        {
+            const VkVertexInputBindingDescription *binding = &graphics->attribute_bindings[i];
+
+            divisor = 1u;
+
+            for (j = 0; j < graphics->instance_divisor_count; j++)
+            {
+                if (graphics->instance_divisors[j].binding == binding->binding)
+                    divisor = graphics->instance_divisors[j].divisor;
+            }
+
+            ERR("  %u: binding %u, input rate %u, stride %u, divisor %u\n", binding->binding, binding->inputRate, binding->stride, divisor);
+        }
+    }
+
+    if (graphics->cached_desc.xfb_info)
+    {
+        ERR("XFB (stage %u):\n", graphics->cached_desc.xfb_stage);
+
+        for (i = 0; i < graphics->cached_desc.xfb_info->element_count; i++)
+        {
+            const struct vkd3d_shader_transform_feedback_element *elem = &graphics->cached_desc.xfb_info->elements[i];
+
+            ERR("  Element %u: stream %u, semantic %s%u, components %#x, output %u\n", i,
+                    elem->stream_index, elem->semantic_name, elem->semantic_index,
+                    ((1u << elem->component_count) - 1u) << elem->component_index,
+                    elem->output_slot);
+        }
+
+        for (i = 0; i < graphics->cached_desc.xfb_info->buffer_stride_count; i++)
+            ERR("  Buffer %u: stride %u\n", i, graphics->cached_desc.xfb_info->buffer_strides[i]);
+    }
+
+    if (graphics->rt_count)
+    {
+        ERR("RTVs: %u\n", graphics->rt_count);
+
+        for (i = 0; i < graphics->rt_count; i++)
+        {
+            const VkPipelineColorBlendAttachmentState *blend = &graphics->blend_attachments[i];
+
+            ERR("  %u: %u (blend enable %u, write mask %#x)\n", i, graphics->rtv_formats[i],
+                    blend->blendEnable, blend->colorWriteMask);
+        }
+    }
+
+    if (graphics->dsv_format)
+    {
+        ERR("DSV: %u\n", graphics->dsv_format);
+        ERR("  Depth test: %u (write: %u)\n", graphics->ds_desc.depthTestEnable, graphics->ds_desc.depthWriteEnable);
+        ERR("  Depth bounds test: %u\n", graphics->ds_desc.depthBoundsTestEnable);
+
+        if (graphics->dsv_format->vk_aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT)
+        {
+            ERR("  Stencil test: %u (write: %u)\n", graphics->ds_desc.stencilTestEnable, graphics->ds_desc.stencilTestEnable &&
+                    (graphics->ds_desc.front.writeMask || graphics->ds_desc.back.writeMask));
+        }
+    }
+
+    ERR("Logic op enabled: %u (logic op: %u)\n",
+            graphics->blend_desc.logicOpEnable, graphics->blend_desc.logicOp);
+
+    ERR("Sample count: %u (mask: %#x, sample shading %u, alpha to coverage %u)\n",
+            graphics->ms_desc.rasterizationSamples, graphics->sample_mask,
+            graphics->ms_desc.sampleShadingEnable, graphics->ms_desc.alphaToCoverageEnable);
+
+    if (!graphics->rs_desc.rasterizerDiscardEnable)
+    {
+        ERR("Rasterizer state:\n");
+        ERR("  Polygon mode: %u\n", graphics->rs_desc.polygonMode);
+        ERR("  Line mode: %u (width: %f)\n", graphics->rs_line_info.lineRasterizationMode, graphics->rs_desc.lineWidth);
+        ERR("  Conservative: %u\n", graphics->rs_conservative_info.conservativeRasterizationMode);
+    }
+
+    ERR("Dynamic state: %#x (explicit: %#x)\n", graphics->pipeline_dynamic_states, graphics->explicit_dynamic_states);
+}
+
 static VkResult d3d12_pipeline_state_link_pipeline_variant(struct d3d12_pipeline_state *state,
         const struct vkd3d_pipeline_key *key, const struct vkd3d_format *dsv_format, VkPipelineCache vk_cache,
         uint32_t dynamic_state_flags, VkPipeline *vk_pipeline)
@@ -5224,7 +5599,10 @@ static VkResult d3d12_pipeline_state_link_pipeline_variant(struct d3d12_pipeline
             vk_cache, 1, &create_info, NULL, vk_pipeline));
 
     if (vr != VK_SUCCESS && vr != VK_PIPELINE_COMPILE_REQUIRED)
-        ERR("Failed to create link pipeline, vr %d.\n", vr);
+    {
+        ERR("Failed to link pipeline variant, vr %d.\n", vr);
+        d3d12_pipeline_state_log_graphics_state(state);
+    }
 
     return vr;
 }
@@ -5244,6 +5622,7 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
     VkPipelineTessellationStateCreateInfo tessellation_info;
     bool has_vertex_input_state, has_fragment_output_state;
     VkPipelineCreationFeedbackCreateInfoEXT feedback_info;
+    VkPipelineMultisampleStateCreateInfo multisample_info;
     VkPipelineDynamicStateCreateInfo dynamic_create_info;
     struct d3d12_device *device = state->device;
     VkGraphicsPipelineCreateInfo pipeline_desc;
@@ -5319,7 +5698,14 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
     }
 
     if (has_fragment_output_state || graphics->ms_desc.sampleShadingEnable)
-        pipeline_desc.pMultisampleState = &graphics->ms_desc;
+    {
+        multisample_info = graphics->ms_desc;
+
+        if (key && key->rasterization_samples)
+            multisample_info.rasterizationSamples = key->rasterization_samples;
+
+        pipeline_desc.pMultisampleState = &multisample_info;
+    }
 
     if (has_fragment_output_state)
         pipeline_desc.pColorBlendState = &fragment_output_desc.cb_info;
@@ -5439,7 +5825,9 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
 
     if (vr < 0)
     {
-        WARN("Failed to create Vulkan graphics pipeline, vr %d.\n", vr);
+        ERR("Failed to create Vulkan graphics pipeline, vr %d.\n", vr);
+        d3d12_pipeline_state_log_graphics_state(state);
+
         vk_pipeline = VK_NULL_HANDLE;
         goto err;
     }
@@ -5500,6 +5888,17 @@ VkPipeline d3d12_pipeline_state_get_pipeline(struct d3d12_pipeline_state *state,
         return VK_NULL_HANDLE;
     }
 
+    /* We also need a fallback pipeline if sample counts do not match. */
+    if (dyn_state->rasterization_samples && dyn_state->rasterization_samples != state->graphics.ms_desc.rasterizationSamples &&
+            !(graphics->pipeline_dynamic_states & VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES))
+    {
+        WARN("Mismatch in sample count, pipeline expects %u, but render target has %u.\n",
+                state->graphics.ms_desc.rasterizationSamples, dyn_state->rasterization_samples);
+
+        if (state->graphics.ms_desc.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT)
+            return VK_NULL_HANDLE;
+    }
+
     *dynamic_state_flags = state->graphics.pipeline_dynamic_states;
     return state->graphics.pipeline;
 }
@@ -5532,6 +5931,12 @@ VkPipeline d3d12_pipeline_state_get_or_create_pipeline(struct d3d12_pipeline_sta
     }
 
     pipeline_key.dsv_format = dsv_format ? dsv_format->vk_format : VK_FORMAT_UNDEFINED;
+
+    if (!(graphics->pipeline_dynamic_states & VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES))
+    {
+        pipeline_key.rasterization_samples = dyn_state->rasterization_samples
+              ? dyn_state->rasterization_samples : graphics->ms_desc.rasterizationSamples;
+    }
 
     if ((vk_pipeline = d3d12_pipeline_state_find_compiled_pipeline(state, &pipeline_key, dynamic_state_flags)))
     {

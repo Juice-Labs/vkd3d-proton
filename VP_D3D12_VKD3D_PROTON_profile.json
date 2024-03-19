@@ -1,5 +1,5 @@
 {
-    "$schema": "https://schema.khronos.org/vulkan/profiles-0.8.1-250.json#",
+    "$schema": "https://schema.khronos.org/vulkan/profiles-0.8-latest.json#",
     "capabilities": {
         "baseline_features": {
             "extensions": {
@@ -176,7 +176,8 @@
                 "VK_KHR_fragment_shading_rate": 1,
                 "VK_EXT_pipeline_library_group_handles": 1,
                 "VK_KHR_ray_tracing_maintenance1": 1,
-                "VK_EXT_mesh_shader": 1
+                "VK_EXT_mesh_shader": 1,
+                "VK_EXT_conservative_rasterization": 1
             },
             "formats": {
                 "VK_FORMAT_R32G32_SFLOAT": {
@@ -447,6 +448,20 @@
                 }
             }
         },
+        "shader_model_67": {
+            "extensions": {
+                "VK_KHR_shader_maximal_reconvergence": 1,
+                "VK_KHR_shader_quad_control": 1
+            },
+            "features": {
+                "VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR": {
+                    "shaderMaximalReconvergence": true
+                },
+                "VkPhysicalDeviceShaderQuadControlFeaturesKHR": {
+                    "shaderQuadControl": true
+                }
+            }
+        },
         "optimal_performance": {
             "extensions": {
                 "VK_EXT_descriptor_buffer": 1,
@@ -458,7 +473,8 @@
                 "VK_EXT_graphics_pipeline_library": 1,
                 "VK_KHR_pipeline_library": 1,
                 "VK_AMD_buffer_marker": 1,
-                "VK_EXT_scalar_block_layout": 1
+                "VK_EXT_scalar_block_layout": 1,
+                "VK_EXT_swapchain_maintenance1" : 1
             },
             "features": {
                 "VkPhysicalDeviceDescriptorBufferFeaturesEXT": {
@@ -489,6 +505,9 @@
                 },
                 "VkPhysicalDeviceScalarBlockLayoutFeaturesEXT": {
                     "scalarBlockLayout": true
+                },
+                "VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT": {
+                    "swapchainMaintenance1": true
                 }
             },
             "properties": {
@@ -551,7 +570,8 @@
                 "VK_AMD_device_coherent_memory": 1,
                 "VK_AMD_shader_core_properties": 1,
                 "VK_AMD_shader_core_properties2": 1,
-                "VK_EXT_dynamic_rendering_unused_attachments": 1
+                "VK_EXT_dynamic_rendering_unused_attachments": 1,
+                "VK_EXT_image_compression_control": 1
             },
             "features": {
                 "VkPhysicalDeviceCoherentMemoryFeaturesAMD": {
@@ -559,6 +579,9 @@
                 },
                 "VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT": {
                     "dynamicRenderingUnusedAttachments": true
+                },
+                "VkPhysicalDeviceImageCompressionControlFeaturesEXT": {
+                    "imageCompressionControl": true
                 }
             },
             "properties": {
@@ -580,11 +603,15 @@
                 "VK_NV_shader_sm_builtins": 1,
                 "VK_NVX_binary_import": 1,
                 "VK_NVX_image_view_handle": 1,
-                "VK_NV_device_diagnostic_checkpoints": 1
+                "VK_NV_device_diagnostic_checkpoints": 1,
+                "VK_NV_raw_access_chains": 1
             },
             "features": {
                 "VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT": {
                     "pageableDeviceLocalMemory": true
+                },
+                "VkPhysicalDeviceRawAccessChainsFeaturesNV": {
+                    "shaderRawAccessChains": true
                 }
             },
             "properties": {
@@ -724,6 +751,7 @@
                 "fl_12_2_properties",
                 "shader_model_60",
                 "shader_model_66",
+                "shader_model_67",
                 "optimal_performance",
                 "optional",
                 "optional_amd"
@@ -745,6 +773,7 @@
                 "fl_12_2_properties",
                 "shader_model_60",
                 "shader_model_66",
+                "shader_model_67",
                 "optimal_performance",
                 "optional",
                 "optional_nv"
@@ -756,6 +785,12 @@
         "Hans-Kristian Arntzen": { "company": "Valve" }
     },
     "history": [
+        {
+            "revision": 2,
+            "date": "2024-02-09",
+            "author": "Hans-Kristian Arntzen",
+            "comment": "Add SM 6.7"
+        },
         {
             "revision": 1,
             "date": "2023-05-23",

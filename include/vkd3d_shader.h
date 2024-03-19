@@ -369,6 +369,9 @@ enum vkd3d_shader_target_extension
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP16_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP64_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_SUBGROUP_PARTITIONED_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_QUAD_CONTROL_RECONVERGENCE,
+    VKD3D_SHADER_TARGET_EXTENSION_RAW_ACCESS_CHAINS_NV,
     VKD3D_SHADER_TARGET_EXTENSION_COUNT,
 };
 
@@ -850,6 +853,8 @@ enum vkd3d_sysval_semantic
     VKD3D_SV_TESS_FACTOR_TRIINT        = 14,
     VKD3D_SV_TESS_FACTOR_LINEDET       = 15,
     VKD3D_SV_TESS_FACTOR_LINEDEN       = 16,
+    VKD3D_SV_BARYCENTRICS              = 23,
+    VKD3D_SV_SHADING_RATE              = 24,
 
     VKD3D_FORCE_32_BIT_ENUM(VKD3D_SYSVAL_SEMANTIC),
 };
@@ -930,6 +935,8 @@ int vkd3d_shader_scan_dxbc(const struct vkd3d_shader_code *dxbc,
 int vkd3d_shader_parse_input_signature(const struct vkd3d_shader_code *dxbc,
         struct vkd3d_shader_signature *signature);
 int vkd3d_shader_parse_output_signature(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_shader_signature *signature);
+int vkd3d_shader_parse_patch_constant_signature(const struct vkd3d_shader_code *dxbc,
         struct vkd3d_shader_signature *signature);
 struct vkd3d_shader_signature_element *vkd3d_shader_find_signature_element(
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
@@ -1063,6 +1070,19 @@ typedef struct vkd3d_shader_signature_element * (*PFN_vkd3d_shader_find_signatur
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
         unsigned int semantic_index, unsigned int stream_index);
 typedef void (*PFN_vkd3d_shader_free_shader_signature)(struct vkd3d_shader_signature *signature);
+
+int vkd3d_shader_parse_root_signature_v_1_0(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+
+vkd3d_shader_hash_t vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+        const struct vkd3d_root_signature_desc2 *desc);
 
 #ifdef __cplusplus
 }

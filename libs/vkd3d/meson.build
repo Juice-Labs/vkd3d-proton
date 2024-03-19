@@ -60,6 +60,7 @@ vkd3d_src = [
   'cache.c',
   'command.c',
   'command_list_vkd3d_ext.c',
+  'command_queue_vkd3d_ext.c',
   'device.c',
   'device_vkd3d_ext.c',
   'heap.c',
@@ -74,7 +75,8 @@ vkd3d_src = [
   'vkd3d_main.c',
   'raytracing_pipeline.c',
   'acceleration_structure.c',
-  'swapchain.c'
+  'swapchain.c',
+  'queue_timeline.c'
 ]
 
 if enable_renderdoc

@@ -37,6 +37,7 @@
 #include "vkd3d_platform.h"
 #include "vkd3d_swapchain_factory.h"
 #include "vkd3d_command_list_vkd3d_ext.h"
+#include "vkd3d_command_queue_vkd3d_ext.h"
 #include "vkd3d_device_vkd3d_ext.h"
 #include "vkd3d_string.h"
 #include "vkd3d_file_utils.h"
@@ -125,6 +126,8 @@ struct vkd3d_vulkan_info
     bool KHR_present_wait;
     bool KHR_present_id;
     bool KHR_maintenance5;
+    bool KHR_shader_maximal_reconvergence;
+    bool KHR_shader_quad_control;
     /* EXT device extensions */
     bool EXT_calibrated_timestamps;
     bool EXT_conditional_rendering;
@@ -137,6 +140,7 @@ struct vkd3d_vulkan_info
     bool EXT_transform_feedback;
     bool EXT_vertex_attribute_divisor;
     bool EXT_extended_dynamic_state2;
+    bool EXT_extended_dynamic_state3;
     bool EXT_external_memory_host;
     bool EXT_shader_image_atomic_int64;
     bool EXT_mesh_shader;
@@ -153,6 +157,7 @@ struct vkd3d_vulkan_info
     bool EXT_dynamic_rendering_unused_attachments;
     bool EXT_line_rasterization;
     bool EXT_image_compression_control;
+    bool EXT_device_fault;
     /* AMD device extensions */
     bool AMD_buffer_marker;
     bool AMD_device_coherent_memory;
@@ -169,9 +174,16 @@ struct vkd3d_vulkan_info
     bool NV_shader_subgroup_partitioned;
     bool NV_memory_decompression;
     bool NV_device_generated_commands_compute;
+    bool NV_low_latency2;
+    bool NV_raw_access_chains;
     /* VALVE extensions */
     bool VALVE_mutable_descriptor_type;
     bool VALVE_descriptor_set_host_mapping;
+
+    /* Optional extensions which are enabled externally as optional extensions
+     * if swapchain/surface extensions are enabled. */
+    bool EXT_surface_maintenance1;
+    bool EXT_swapchain_maintenance1;
 
     unsigned int extension_count;
     const char* const* extension_names;
@@ -203,6 +215,11 @@ struct vkd3d_instance
 extern uint64_t vkd3d_config_flags;
 extern struct vkd3d_shader_quirk_info vkd3d_shader_quirk_info;
 
+struct vkd3d_queue_timeline_trace_cookie
+{
+    unsigned int index;
+};
+
 struct vkd3d_waiting_fence
 {
     d3d12_fence_iface *fence;
@@ -210,6 +227,7 @@ struct vkd3d_waiting_fence
     uint64_t value;
     struct d3d12_command_allocator **command_allocators;
     size_t num_command_allocators;
+    struct vkd3d_queue_timeline_trace_cookie timeline_cookie;
     bool signal;
 };
 
@@ -225,12 +243,28 @@ struct vkd3d_fence_worker
     size_t enqueued_fences_size;
 
     struct d3d12_device *device;
-};
+    struct d3d12_command_queue *queue;
 
-HRESULT vkd3d_fence_worker_start(struct vkd3d_fence_worker *worker,
-        struct d3d12_device *device);
-HRESULT vkd3d_fence_worker_stop(struct vkd3d_fence_worker *worker,
-        struct d3d12_device *device);
+    /* To aid timeline profiles. A single fence worker processes work monotonically. */
+    struct
+    {
+        char tid[64];
+        /* The lock timestamps is to ensure that the timeline trace becomes readable in chrome://tracing.
+         * For us, start and end ranges can overlap. This ends up as an unreadable trace
+         * since the tracer expects a stack-like nesting for overlapping events.
+         * To work around this, we ensure that start TS of a following event is moved to end TS of previous event. */
+        double lock_end_gpu_ts;
+        double lock_end_cpu_ts;
+        double lock_end_event_ts;
+        double lock_end_present_wait_ts;
+
+        /* A thread local buffer used to avoid holding locks for too long.
+         * Only submission threads flush out JSON IO and this serves as thread-local
+         * scratch space. */
+        unsigned int *list_buffer;
+        size_t list_buffer_size;
+    } timeline;
+};
 
 /* 2 MiB is a good threshold, because it's huge page size. */
 #define VKD3D_VA_BLOCK_SIZE_BITS (21)
@@ -244,6 +278,11 @@ HRESULT vkd3d_fence_worker_stop(struct vkd3d_fence_worker *worker,
 #define VKD3D_VA_NEXT_BITS (12)
 #define VKD3D_VA_NEXT_COUNT (1ull << VKD3D_VA_NEXT_BITS)
 #define VKD3D_VA_NEXT_MASK (VKD3D_VA_NEXT_COUNT - 1)
+
+HRESULT vkd3d_enqueue_timeline_semaphore(struct vkd3d_fence_worker *worker,
+        d3d12_fence_iface *fence, VkSemaphore timeline, uint64_t value, bool signal,
+        struct d3d12_command_allocator **command_allocators, size_t num_command_allocators,
+        const struct vkd3d_queue_timeline_trace_cookie *timeline_cookie);
 
 struct vkd3d_unique_resource;
 
@@ -500,6 +539,7 @@ struct vkd3d_waiting_event
     vkd3d_native_sync_handle handle;
     bool *latch;
     uint32_t *payload;
+    struct vkd3d_queue_timeline_trace_cookie timeline_cookie;
 };
 
 struct d3d12_fence
@@ -1687,7 +1727,10 @@ struct d3d12_root_signature
     LONG refcount;
     LONG internal_refcount;
 
-    vkd3d_shader_hash_t compatibility_hash;
+    /* Compatibility for exact match. For PSO blob validation. */
+    vkd3d_shader_hash_t pso_compatibility_hash;
+    /* Compatiblity for ABI in RTPSOs. Match if the VkPipelineLayouts are equivalent. */
+    vkd3d_shader_hash_t layout_compatibility_hash;
 
     struct d3d12_bind_point_layout graphics, mesh, compute, raygen;
     VkDescriptorSetLayout vk_sampler_descriptor_layout;
@@ -1767,16 +1810,6 @@ HRESULT vkd3d_create_pipeline_layout(struct d3d12_device *device,
         unsigned int push_constant_count, const VkPushConstantRange *push_constants,
         VkPipelineLayout *pipeline_layout);
 
-int vkd3d_parse_root_signature_v_1_0(const struct vkd3d_shader_code *dxbc,
-        struct vkd3d_versioned_root_signature_desc *desc,
-        vkd3d_shader_hash_t *compatibility_hash);
-int vkd3d_parse_root_signature_v_1_2(const struct vkd3d_shader_code *dxbc,
-        struct vkd3d_versioned_root_signature_desc *out_desc,
-        vkd3d_shader_hash_t *compatibility_hash);
-int vkd3d_parse_root_signature_v_1_2_from_raw_payload(const struct vkd3d_shader_code *dxbc,
-        struct vkd3d_versioned_root_signature_desc *out_desc,
-        vkd3d_shader_hash_t *compatibility_hash);
-
 VkShaderStageFlags vkd3d_vk_stage_flags_from_visibility(D3D12_SHADER_VISIBILITY visibility);
 enum vkd3d_shader_visibility vkd3d_shader_visibility_from_d3d12(D3D12_SHADER_VISIBILITY visibility);
 HRESULT vkd3d_create_descriptor_set_layout(struct d3d12_device *device,
@@ -1809,12 +1842,12 @@ static inline const struct d3d12_bind_point_layout *d3d12_root_signature_get_lay
     return NULL;
 }
 
-static inline bool d3d12_root_signature_is_compatible(
+static inline bool d3d12_root_signature_is_pipeline_compatible(
         const struct d3d12_root_signature *a, const struct d3d12_root_signature *b)
 {
-    if (a && a->compatibility_hash == 0)
+    if (a && a->pso_compatibility_hash == 0)
         a = NULL;
-    if (b && b->compatibility_hash == 0)
+    if (b && b->pso_compatibility_hash == 0)
         b = NULL;
 
     if (!a && !b)
@@ -1822,7 +1855,23 @@ static inline bool d3d12_root_signature_is_compatible(
     else if ((!!a) != (!!b))
         return false;
     else
-        return a->compatibility_hash == b->compatibility_hash;
+        return a->pso_compatibility_hash == b->pso_compatibility_hash;
+}
+
+static inline bool d3d12_root_signature_is_layout_compatible(
+        const struct d3d12_root_signature *a, const struct d3d12_root_signature *b)
+{
+    if (a && a->layout_compatibility_hash == 0)
+        a = NULL;
+    if (b && b->layout_compatibility_hash == 0)
+        b = NULL;
+
+    if (!a && !b)
+        return true;
+    else if ((!!a) != (!!b))
+        return false;
+    else
+        return a->layout_compatibility_hash == b->layout_compatibility_hash;
 }
 
 enum vkd3d_dynamic_state_flag
@@ -1840,6 +1889,7 @@ enum vkd3d_dynamic_state_flag
     VKD3D_DYNAMIC_STATE_DEPTH_WRITE_ENABLE    = (1 << 10),
     VKD3D_DYNAMIC_STATE_STENCIL_WRITE_MASK    = (1 << 11),
     VKD3D_DYNAMIC_STATE_DEPTH_BIAS            = (1 << 12),
+    VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES = (1 << 13),
 };
 
 struct vkd3d_shader_debug_ring_spec_constants
@@ -2139,8 +2189,8 @@ static inline bool vk_primitive_topology_supports_restart(VkPrimitiveTopology to
 struct vkd3d_pipeline_key
 {
     D3D12_PRIMITIVE_TOPOLOGY topology;
-    uint32_t strides[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
     VkFormat dsv_format;
+    VkSampleCountFlagBits rasterization_samples;
 
     bool dynamic_topology;
 };
@@ -2442,6 +2492,7 @@ struct vkd3d_dynamic_state
     uint32_t viewport_count;
     VkViewport viewports[D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     VkRect2D scissors[D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    VkSampleCountFlagBits rasterization_samples;
 
     float blend_constants[4];
 
@@ -2868,6 +2919,7 @@ struct d3d12_command_list
     struct d3d12_transfer_batch_state transfer_batch;
     struct d3d12_wbi_batch_state wbi_batch;
     struct d3d12_rtas_batch_state rtas_batch;
+    struct vkd3d_queue_timeline_trace_cookie timeline_cookie;
 
     struct vkd3d_private_store private_store;
 
@@ -2880,6 +2932,7 @@ HRESULT d3d12_command_list_create(struct d3d12_device *device,
         UINT node_mask, D3D12_COMMAND_LIST_TYPE type, struct d3d12_command_list **list);
 bool d3d12_command_list_reset_query(struct d3d12_command_list *list,
         VkQueryPool vk_pool, uint32_t index);
+void d3d12_command_list_end_current_render_pass(struct d3d12_command_list *list, bool suspend);
 
 static inline struct vkd3d_pipeline_bindings *d3d12_command_list_get_bindings(
         struct d3d12_command_list *list, enum vkd3d_pipeline_type pipeline_type)
@@ -2974,17 +3027,23 @@ struct vkd3d_queue
 
     VkSemaphoreSubmitInfo *wait_semaphores;
     size_t wait_semaphores_size;
+    uint64_t *wait_values_virtual;
+    size_t wait_values_virtual_size;
     d3d12_fence_iface **wait_fences;
     size_t wait_fences_size;
     uint32_t wait_count;
+
+    bool need_virtual_wait_values;
 };
 
 VkQueue vkd3d_queue_acquire(struct vkd3d_queue *queue);
 HRESULT vkd3d_queue_create(struct d3d12_device *device, uint32_t family_index, uint32_t queue_index,
         const VkQueueFamilyProperties *properties, struct vkd3d_queue **queue);
+void vkd3d_set_queue_out_of_band(struct d3d12_device *device, struct vkd3d_queue *queue, VkOutOfBandQueueTypeNV type);
 void vkd3d_queue_destroy(struct vkd3d_queue *queue, struct d3d12_device *device);
 void vkd3d_queue_release(struct vkd3d_queue *queue);
-void vkd3d_queue_add_wait(struct vkd3d_queue *queue, d3d12_fence_iface *waiter, VkSemaphore semaphore, uint64_t value);
+void vkd3d_queue_add_wait(struct vkd3d_queue *queue, d3d12_fence_iface *waiter,
+        VkSemaphore semaphore, uint64_t value, uint64_t virtual_value);
 
 enum vkd3d_submission_type
 {
@@ -3037,6 +3096,7 @@ struct d3d12_command_queue_submission_execute
     struct d3d12_command_allocator **command_allocators;
     UINT cmd_count;
     UINT num_command_allocators;
+    uint64_t low_latency_frame_id;
 
     struct vkd3d_initial_transition *transitions;
     size_t transition_count;
@@ -3046,6 +3106,8 @@ struct d3d12_command_queue_submission_execute
     unsigned int *breadcrumb_indices;
     size_t breadcrumb_indices_count;
 #endif
+
+    struct vkd3d_queue_timeline_trace_cookie timeline_cookie;
 
     bool debug_capture;
     bool split_submission;
@@ -3092,12 +3154,33 @@ struct dxgi_vk_swap_chain_factory
     struct d3d12_command_queue *queue;
 };
 
+struct dxgi_vk_swap_chain;
+
+bool dxgi_vk_swap_chain_low_latency_enabled(struct dxgi_vk_swap_chain *chain);
+void dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain);
+void dxgi_vk_swap_chain_set_latency_sleep_mode(struct dxgi_vk_swap_chain *chain,
+	bool low_latency_mode, bool low_latency_boost, uint32_t minimum_interval_us);
+void dxgi_vk_swap_chain_set_latency_marker(struct dxgi_vk_swap_chain *chain,
+	uint64_t frameID, VkLatencyMarkerNV marker);
+void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain,
+	D3D12_LATENCY_RESULTS *latency_results);
+
+ULONG dxgi_vk_swap_chain_incref(struct dxgi_vk_swap_chain *chain);
+ULONG dxgi_vk_swap_chain_decref(struct dxgi_vk_swap_chain *chain);
+
 HRESULT dxgi_vk_swap_chain_factory_init(struct d3d12_command_queue *queue, struct dxgi_vk_swap_chain_factory *chain);
 
+/* ID3D12CommandQueueExt */
+typedef ID3D12CommandQueueExt d3d12_command_queue_vkd3d_ext_iface;
+
 /* ID3D12CommandQueue */
+typedef ID3D12CommandQueue d3d12_command_queue_iface;
+
 struct d3d12_command_queue
 {
-    ID3D12CommandQueue ID3D12CommandQueue_iface;
+    d3d12_command_queue_iface ID3D12CommandQueue_iface;
+    d3d12_command_queue_vkd3d_ext_iface ID3D12CommandQueueExt_iface;
+
     LONG refcount;
 
     D3D12_COMMAND_QUEUE_DESC desc;
@@ -3119,6 +3202,7 @@ struct d3d12_command_queue
     struct vkd3d_fence_worker fence_worker;
     struct vkd3d_private_store private_store;
     struct dxgi_vk_swap_chain_factory vk_swap_chain_factory;
+    unsigned int submission_thread_tid;
 };
 
 HRESULT d3d12_command_queue_create(struct d3d12_device *device,
@@ -3380,6 +3464,8 @@ struct vkd3d_breadcrumb_tracer
     vkd3d_shader_hash_t *barrier_hashes;
     size_t barrier_hashes_size;
     uint32_t barrier_hashes_count;
+
+    bool reported_fault;
 };
 
 HRESULT vkd3d_breadcrumb_tracer_init(struct vkd3d_breadcrumb_tracer *tracer, struct d3d12_device *device);
@@ -3470,7 +3556,9 @@ void vkd3d_breadcrumb_tracer_dump_command_list(struct vkd3d_breadcrumb_tracer *t
 } while(0)
 
 /* Remember to kick debug ring as well. */
-#define VKD3D_DEVICE_REPORT_BREADCRUMB_IF(device, cond) do { \
+#define VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(device, cond) do { \
+    if (cond) \
+        d3d12_device_report_fault(device); \
     if ((vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS) && (cond)) { \
         vkd3d_breadcrumb_tracer_report_device_lost(&(device)->breadcrumb_tracer, device); \
         vkd3d_shader_debug_ring_kick(&(device)->debug_ring, device, true); \
@@ -3575,7 +3663,10 @@ static inline void vkd3d_breadcrumb_buffer_copy(
 #define VKD3D_BREADCRUMB_AUX32(v) ((void)(v))
 #define VKD3D_BREADCRUMB_AUX64(v) ((void)(v))
 #define VKD3D_BREADCRUMB_COOKIE(v) ((void)(v))
-#define VKD3D_DEVICE_REPORT_BREADCRUMB_IF(device, cond) ((void)(device), (void)(cond))
+#define VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(device, cond) do { \
+    if (cond) \
+        d3d12_device_report_fault(device); \
+} while(0)
 #define VKD3D_BREADCRUMB_FLUSH_BATCHES(list) ((void)(list))
 #define VKD3D_BREADCRUMB_TAG(tag) ((void)(tag))
 #define VKD3D_BREADCRUMB_RESOURCE(res) ((void)(res))
@@ -4294,6 +4385,7 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color_features;
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2_features;
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended_dynamic_state2_features;
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT extended_dynamic_state3_features;
     VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mutable_descriptor_features;
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline_features;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features;
@@ -4325,6 +4417,11 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceMaintenance5FeaturesKHR maintenance_5_features;
     VkPhysicalDeviceLineRasterizationFeaturesEXT line_rasterization_features;
     VkPhysicalDeviceImageCompressionControlFeaturesEXT image_compression_control_features;
+    VkPhysicalDeviceFaultFeaturesEXT fault_features;
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT swapchain_maintenance1_features;
+    VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR shader_maximal_reconvergence_features;
+    VkPhysicalDeviceShaderQuadControlFeaturesKHR shader_quad_control_features;
+    VkPhysicalDeviceRawAccessChainsFeaturesNV raw_access_chains_nv;
 
     VkPhysicalDeviceFeatures2 features2;
 
@@ -4380,6 +4477,7 @@ enum vkd3d_queue_family
 
 struct vkd3d_queue_family_info
 {
+    struct vkd3d_queue *out_of_band_queue;
     struct vkd3d_queue **queues;
     uint32_t queue_count;
     uint32_t vk_family_index;
@@ -4394,6 +4492,22 @@ struct vkd3d_cached_command_allocator
     uint32_t vk_family_index;
 };
 
+struct vkd3d_device_swapchain_info
+{
+    struct dxgi_vk_swap_chain *low_latency_swapchain;
+    uint32_t swapchain_count;
+    bool mode;
+    bool boost;
+    uint32_t minimum_us;
+};
+
+struct vkd3d_device_frame_markers
+{
+    uint64_t simulation;
+    uint64_t render;
+    uint64_t present;
+};
+
 /* ID3D12Device */
 typedef ID3D12Device12 d3d12_device_iface;
 
@@ -4406,6 +4520,9 @@ typedef ID3D12DeviceExt d3d12_device_vkd3d_ext_iface;
 /* ID3D12DXVKInteropDevice */
 typedef ID3D12DXVKInteropDevice d3d12_dxvk_interop_device_iface;
 
+/* ID3DLowLatencyDevice */
+typedef ID3DLowLatencyDevice d3d_low_latency_device_iface;
+
 struct d3d12_device_scratch_pool
 {
     struct vkd3d_scratch_buffer scratch_buffers[VKD3D_MAX_SCRATCH_BUFFER_COUNT];
@@ -4415,11 +4532,129 @@ struct d3d12_device_scratch_pool
     unsigned int high_water_mark;
 };
 
+enum vkd3d_queue_timeline_trace_state_type
+{
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_NONE = 0,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_EVENT,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_SUBMISSION,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_WAIT,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_SIGNAL,
+
+    /* Blit task */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_PRESENT_BLIT,
+
+    /* Waiting for present wait to complete. */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_PRESENT_WAIT,
+
+    /* Time spent blocking in ::Present() in user thread. */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_PRESENT_BLOCK,
+
+    /* Time spent blocking in LowLatencySleep in user thread. */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_LOW_LATENCY_SLEEP,
+
+    /* Reset() and Close() are useful instant events to see when command recording is happening and
+     * which threads do so. */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_COMMAND_LIST,
+
+    /* Misc instantaneous events that are expected to be heavy. */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_QUEUE_PRESENT,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_COMMITTED_RESOURCE_ALLOCATION,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_HEAP_ALLOCATION,
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_COMMAND_ALLOCATOR_RESET,
+};
+
+struct vkd3d_queue_timeline_trace_state
+{
+    enum vkd3d_queue_timeline_trace_state_type type;
+    unsigned int tid;
+    uint64_t start_ts;
+    uint64_t start_submit_ts;
+    uint64_t record_end_ts;
+    uint64_t record_cookie;
+    char desc[128 - 5 * sizeof(uint64_t)];
+};
+
+struct vkd3d_queue_timeline_trace
+{
+    pthread_mutex_t lock;
+    pthread_mutex_t ready_lock;
+    FILE *file;
+    bool active;
+
+    unsigned int *vacant_indices;
+    size_t vacant_indices_count;
+    size_t vacant_indices_size;
+
+    unsigned int *ready_command_lists;
+    size_t ready_command_lists_count;
+    size_t ready_command_lists_size;
+
+    struct vkd3d_queue_timeline_trace_state *state;
+    uint64_t base_ts;
+    uint64_t submit_count;
+};
+
+static inline bool vkd3d_queue_timeline_trace_cookie_is_valid(struct vkd3d_queue_timeline_trace_cookie cookie)
+{
+    return cookie.index != 0;
+}
+
+HRESULT vkd3d_queue_timeline_trace_init(struct vkd3d_queue_timeline_trace *trace,
+        struct d3d12_device *device);
+void vkd3d_queue_timeline_trace_cleanup(struct vkd3d_queue_timeline_trace *trace);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_event_signal(struct vkd3d_queue_timeline_trace *trace,
+        vkd3d_native_sync_handle handle, d3d12_fence_iface *fence, uint64_t value);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_signal(struct vkd3d_queue_timeline_trace *trace,
+        d3d12_fence_iface *fence, uint64_t value);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_wait(struct vkd3d_queue_timeline_trace *trace,
+        d3d12_fence_iface *fence, uint64_t value);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_swapchain_blit(struct vkd3d_queue_timeline_trace *trace,
+        uint64_t present_id);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_present_wait(struct vkd3d_queue_timeline_trace *trace,
+        uint64_t present_id);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_present_block(struct vkd3d_queue_timeline_trace *trace,
+        uint64_t present_id);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_low_latency_sleep(struct vkd3d_queue_timeline_trace *trace,
+        uint64_t present_id);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_execute(struct vkd3d_queue_timeline_trace *trace,
+        ID3D12CommandList * const *command_lists, unsigned int count);
+struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_command_list(struct vkd3d_queue_timeline_trace *trace);
+
+void vkd3d_queue_timeline_trace_register_instantaneous(struct vkd3d_queue_timeline_trace *trace,
+        enum vkd3d_queue_timeline_trace_state_type type, uint64_t value);
+
+void vkd3d_queue_timeline_trace_complete_event_signal(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_fence_worker *worker,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_complete_execute(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_fence_worker *worker,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_complete_present_wait(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_complete_present_block(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_complete_low_latency_sleep(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_close_command_list(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_begin_execute(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie);
+
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
     d3d12_device_vkd3d_ext_iface ID3D12DeviceExt_iface;
     d3d12_dxvk_interop_device_iface ID3D12DXVKInteropDevice_iface;
+    d3d_low_latency_device_iface ID3DLowLatencyDevice_iface;
     LONG refcount;
 
     VkDevice vk_device;
@@ -4429,6 +4664,7 @@ struct d3d12_device
 
     pthread_mutex_t mutex;
     pthread_mutex_t global_submission_mutex;
+    spinlock_t low_latency_swapchain_spinlock;
 
     VkPhysicalDeviceMemoryProperties memory_properties;
 
@@ -4471,6 +4707,7 @@ struct d3d12_device
     unsigned int format_compatibility_list_count;
     const struct vkd3d_format_compatibility_list *format_compatibility_lists;
     struct vkd3d_bindless_state bindless_state;
+    struct vkd3d_queue_timeline_trace queue_timeline_trace;
     struct vkd3d_memory_info memory_info;
     struct vkd3d_meta_ops meta_ops;
     struct vkd3d_view_map sampler_map;
@@ -4490,6 +4727,9 @@ struct d3d12_device
 #endif
     uint64_t shader_interface_key;
     uint32_t device_has_dgc_templates;
+
+    struct vkd3d_device_swapchain_info swapchain_info;
+    struct vkd3d_device_frame_markers frame_markers;
 };
 
 HRESULT d3d12_device_create(struct vkd3d_instance *instance,
@@ -4503,6 +4743,7 @@ void d3d12_device_unmap_vkd3d_queue(struct d3d12_device *device,
 bool d3d12_device_is_uma(struct d3d12_device *device, bool *coherent);
 void d3d12_device_mark_as_removed(struct d3d12_device *device, HRESULT reason,
         const char *message, ...) VKD3D_PRINTF_FUNC(3, 4);
+void d3d12_device_report_fault(struct d3d12_device *device);
 
 VkPipeline d3d12_device_get_or_create_vertex_input_pipeline(struct d3d12_device *device,
         const struct vkd3d_vertex_input_pipeline_desc *desc);
@@ -4711,6 +4952,43 @@ bool d3d12_device_supports_ray_tracing_tier_1_0(const struct d3d12_device *devic
 UINT d3d12_determine_shading_rate_image_tile_size(struct d3d12_device *device);
 bool d3d12_device_supports_required_subgroup_size_for_stage(
         struct d3d12_device *device, VkShaderStageFlagBits stage);
+
+static inline void d3d12_device_register_swapchain(struct d3d12_device *device, struct dxgi_vk_swap_chain *chain)
+{
+    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+
+    if (!device->swapchain_info.low_latency_swapchain && device->swapchain_info.swapchain_count == 0)
+    {
+        dxgi_vk_swap_chain_incref(chain);
+        device->swapchain_info.low_latency_swapchain = chain;
+        dxgi_vk_swap_chain_set_latency_sleep_mode(chain, device->swapchain_info.mode,
+                device->swapchain_info.boost, device->swapchain_info.minimum_us);
+    }
+    else
+    {
+        dxgi_vk_swap_chain_decref(device->swapchain_info.low_latency_swapchain);
+        device->swapchain_info.low_latency_swapchain = NULL;
+    }
+
+    device->swapchain_info.swapchain_count++;
+
+    spinlock_release(&device->low_latency_swapchain_spinlock);
+}
+
+static inline void d3d12_device_remove_swapchain(struct d3d12_device *device, struct dxgi_vk_swap_chain *chain)
+{
+    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+
+    if (device->swapchain_info.low_latency_swapchain == chain)
+    {
+        dxgi_vk_swap_chain_decref(chain);
+        device->swapchain_info.low_latency_swapchain = NULL;
+    }
+
+    device->swapchain_info.swapchain_count--;
+
+    spinlock_release(&device->low_latency_swapchain_spinlock);
+}
 
 /* ID3DBlob */
 struct d3d_blob
@@ -4963,6 +5241,7 @@ struct vkd3d_format
     VkFormatFeatureFlags2 vk_format_features_castable;
     /* Includes only buffer view features. */
     VkFormatFeatureFlags2 vk_format_features_buffer;
+    VkSampleCountFlags supported_sparse_sample_counts;
 };
 
 static inline size_t vkd3d_format_get_data_offset(const struct vkd3d_format *format,
