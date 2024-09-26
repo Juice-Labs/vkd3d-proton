@@ -181,7 +181,7 @@ VkResult vkd3d_create_pipeline_cache(struct d3d12_device *device,
     return VK_CALL(vkCreatePipelineCache(device->vk_device, &info, NULL, cache));
 }
 
-#define VKD3D_CACHE_BLOB_VERSION MAKE_MAGIC('V','K','B',3)
+#define VKD3D_CACHE_BLOB_VERSION MAKE_MAGIC('V','K','B',4)
 
 enum vkd3d_pipeline_blob_chunk_type
 {
@@ -208,14 +208,14 @@ struct vkd3d_pipeline_blob_chunk
 {
     uint32_t type; /* vkd3d_pipeline_blob_chunk_type with extra data in upper bits. */
     uint32_t size; /* size of data. Does not include size of header. */
-    uint8_t data[]; /* struct vkd3d_pipeline_blob_chunk_*. */
+    uint8_t data[] vkd3d_counted_by(size); /* struct vkd3d_pipeline_blob_chunk_*. */
 };
 
 struct vkd3d_pipeline_blob_chunk_spirv
 {
     uint32_t decompressed_spirv_size;
     uint32_t compressed_spirv_size; /* Size of data[]. */
-    uint8_t data[];
+    uint8_t data[] vkd3d_counted_by(compressed_spirv_size);
 };
 
 struct vkd3d_pipeline_blob_chunk_link
@@ -1726,7 +1726,7 @@ static HRESULT d3d12_pipeline_library_load_pipeline(struct d3d12_pipeline_librar
         {
             root_signature = impl_from_ID3D12RootSignature(desc->root_signature);
             if (root_signature)
-                pipeline_cache_compat.root_signature_compat_hash = root_signature->compatibility_hash;
+                pipeline_cache_compat.root_signature_compat_hash = root_signature->pso_compatibility_hash;
         }
         else if (cached_state->root_signature_compat_hash_is_dxbc_derived)
         {
@@ -3146,7 +3146,9 @@ static void vkd3d_pipeline_library_disk_cache_initial_setup(struct vkd3d_pipelin
 HRESULT vkd3d_pipeline_library_init_disk_cache(struct vkd3d_pipeline_library_disk_cache *cache,
         struct d3d12_device *device)
 {
+    const char *app_name_str = NULL;
     char path_buf[VKD3D_PATH_MAX];
+    char app_name[VKD3D_PATH_MAX];
     VKD3D_UNUSED size_t i, n;
     const char *separator;
     const char *path;
@@ -3168,6 +3170,11 @@ HRESULT vkd3d_pipeline_library_init_disk_cache(struct vkd3d_pipeline_library_dis
     {
         separator = &path[strlen(path) - 1];
         separator = (*separator == '/' || *separator == '\\') ? "" : "/";
+
+        /* If we're using explicit cache directory, multiple games are likely pointing to it,
+         * so split the caches up by name. */
+        if (vkd3d_get_program_name(app_name))
+            app_name_str = app_name;
     }
     else
         separator = "";
@@ -3180,21 +3187,31 @@ HRESULT vkd3d_pipeline_library_init_disk_cache(struct vkd3d_pipeline_library_dis
      * Normally Wine accepts Unix style paths, but not here for whatever reason. */
 
     if (path && path[0] == '/')
-        snprintf(cache->read_path, sizeof(cache->read_path), "Z:\\%s%svkd3d-proton.cache", path + 1, separator);
+        snprintf(cache->read_path, sizeof(cache->read_path), "Z:\\%s%svkd3d-proton", path + 1, separator);
     else if (path)
-        snprintf(cache->read_path, sizeof(cache->read_path), "%s%svkd3d-proton.cache", path, separator);
+        snprintf(cache->read_path, sizeof(cache->read_path), "%s%svkd3d-proton", path, separator);
     else
-        strcpy(cache->read_path, "vkd3d-proton.cache");
+        strcpy(cache->read_path, "vkd3d-proton");
 
     for (i = 0, n = strlen(cache->read_path); i < n; i++)
         if (cache->read_path[i] == '/')
             cache->read_path[i] = '\\';
-    INFO("Remapping VKD3D_SHADER_CACHE to: %s.\n", cache->read_path);
 #else
     if (path)
-        snprintf(cache->read_path, sizeof(cache->read_path), "%s%svkd3d-proton.cache", path, separator);
+        snprintf(cache->read_path, sizeof(cache->read_path), "%s%svkd3d-proton", path, separator);
     else
-        strcpy(cache->read_path, "vkd3d-proton.cache");
+        strcpy(cache->read_path, "vkd3d-proton");
+#endif
+
+    if (app_name_str)
+    {
+        vkd3d_strlcat(cache->read_path, sizeof(cache->read_path), ".");
+        vkd3d_strlcat(cache->read_path, sizeof(cache->read_path), app_name_str);
+    }
+    vkd3d_strlcat(cache->read_path, sizeof(cache->read_path), ".cache");
+
+#ifdef _WIN32
+    INFO("Remapping VKD3D_SHADER_CACHE to: %s.\n", cache->read_path);
 #endif
 
     INFO("Attempting to load disk cache from: %s.\n", cache->read_path);

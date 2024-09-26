@@ -800,6 +800,14 @@ int vkd3d_shader_parse_output_signature(const struct vkd3d_shader_code *dxbc,
     return shader_parse_output_signature(dxbc->code, dxbc->size, signature);
 }
 
+int vkd3d_shader_parse_patch_constant_signature(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_shader_signature *signature)
+{
+    TRACE("dxbc {%p, %zu}, signature %p.\n", dxbc->code, dxbc->size, signature);
+
+    return shader_parse_patch_constant_signature(dxbc->code, dxbc->size, signature);
+}
+
 struct vkd3d_shader_signature_element *vkd3d_shader_find_signature_element(
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
         unsigned int semantic_index, unsigned int stream_index)
@@ -909,4 +917,114 @@ void vkd3d_shader_stage_io_map_free(struct vkd3d_shader_stage_io_map *map)
 
     vkd3d_free(map->entries);
     memset(map, 0, sizeof(*map));
+}
+
+static int vkd3d_shader_parse_root_signature_for_version(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        enum vkd3d_root_signature_version target_version,
+        bool raw_payload,
+        vkd3d_shader_hash_t *compatibility_hash)
+{
+    struct vkd3d_versioned_root_signature_desc desc, converted_desc;
+    int ret;
+
+    if (raw_payload)
+    {
+        if ((ret = vkd3d_shader_parse_root_signature_raw(dxbc->code, dxbc->size, &desc, compatibility_hash)) < 0)
+        {
+            WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
+            return ret;
+        }
+    }
+    else
+    {
+        if ((ret = vkd3d_shader_parse_root_signature(dxbc, &desc, compatibility_hash)) < 0)
+        {
+            WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
+            return ret;
+        }
+    }
+
+    if (desc.version == target_version)
+    {
+        *out_desc = desc;
+    }
+    else
+    {
+        ret = vkd3d_shader_convert_root_signature(&converted_desc, target_version, &desc);
+        vkd3d_shader_free_root_signature(&desc);
+        if (ret < 0)
+        {
+            WARN("Failed to convert from version %#x, vkd3d result %d.\n", desc.version, ret);
+            return ret;
+        }
+
+        *out_desc = converted_desc;
+    }
+
+    return ret;
+}
+
+int vkd3d_shader_parse_root_signature_v_1_0(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash)
+{
+    return vkd3d_shader_parse_root_signature_for_version(dxbc, out_desc, VKD3D_ROOT_SIGNATURE_VERSION_1_0, false,
+            compatibility_hash);
+}
+
+int vkd3d_shader_parse_root_signature_v_1_2(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash)
+{
+    return vkd3d_shader_parse_root_signature_for_version(dxbc, out_desc, VKD3D_ROOT_SIGNATURE_VERSION_1_2, false,
+            compatibility_hash);
+}
+
+int vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash)
+{
+    return vkd3d_shader_parse_root_signature_for_version(dxbc, out_desc, VKD3D_ROOT_SIGNATURE_VERSION_1_2, true,
+            compatibility_hash);
+}
+
+vkd3d_shader_hash_t vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+        const struct vkd3d_root_signature_desc2 *desc)
+{
+    vkd3d_shader_hash_t hash = hash_fnv1_init();
+    uint32_t i;
+
+    hash = hash_fnv1_iterate_u32(hash, desc->static_sampler_count);
+    hash = hash_fnv1_iterate_u32(hash, desc->parameter_count);
+    hash = hash_fnv1_iterate_u32(hash, desc->flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE);
+
+    for (i = 0; i < desc->parameter_count; i++)
+    {
+        hash = hash_fnv1_iterate_u32(hash, desc->parameters[i].parameter_type);
+        if (desc->parameters[i].parameter_type == VKD3D_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
+            hash = hash_fnv1_iterate_u32(hash, desc->parameters[i].constants.value_count);
+        else
+            hash = hash_fnv1_iterate_u32(hash, 0);
+    }
+
+    for (i = 0; i < desc->static_sampler_count; i++)
+    {
+        const struct vkd3d_static_sampler_desc1 *sampler = &desc->static_samplers[i];
+        /* Ignore space / register since those don't affect VkPipelineLayout. */
+        hash = hash_fnv1_iterate_u32(hash, sampler->flags);
+        hash = hash_fnv1_iterate_u32(hash, sampler->shader_visibility);
+        hash = hash_fnv1_iterate_u32(hash, sampler->max_anisotropy);
+        hash = hash_fnv1_iterate_u32(hash, sampler->border_color);
+        hash = hash_fnv1_iterate_u32(hash, sampler->comparison_func);
+        hash = hash_fnv1_iterate_u32(hash, sampler->address_u);
+        hash = hash_fnv1_iterate_u32(hash, sampler->address_v);
+        hash = hash_fnv1_iterate_u32(hash, sampler->address_w);
+        hash = hash_fnv1_iterate_u32(hash, sampler->filter);
+        hash = hash_fnv1_iterate_f32(hash, sampler->min_lod);
+        hash = hash_fnv1_iterate_f32(hash, sampler->max_lod);
+        hash = hash_fnv1_iterate_f32(hash, sampler->mip_lod_bias);
+    }
+
+    return hash;
 }

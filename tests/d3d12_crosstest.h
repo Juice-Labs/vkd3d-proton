@@ -45,8 +45,9 @@
 #if !defined(_WIN32) || defined(VKD3D_FORCE_UTILS_WRAPPER)
 # include "vkd3d_threads.h"
 # include "vkd3d.h"
-# include "vkd3d_sonames.h"
 #endif
+
+#include "vkd3d_sonames.h"
 
 #if !defined(_WIN32)
 #include <dlfcn.h>
@@ -62,6 +63,8 @@ extern PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES pfn_D3D12EnableExperimentalFeature
 extern PFN_D3D12_GET_DEBUG_INTERFACE pfn_D3D12GetDebugInterface;
 extern PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER pfn_D3D12CreateVersionedRootSignatureDeserializer;
 extern PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE pfn_D3D12SerializeVersionedRootSignature;
+extern bool use_warp_device;
+extern unsigned int use_adapter_idx;
 
 #if defined(_WIN32) && !defined(VKD3D_FORCE_UTILS_WRAPPER)
 #define get_d3d12_pfn(name) get_d3d12_pfn_(#name)
@@ -368,8 +371,40 @@ static inline void wait_queue_idle_no_event_(unsigned int line, ID3D12Device *de
     ID3D12Fence_Release(fence);
 }
 
-static bool use_warp_device;
-static unsigned int use_adapter_idx;
+static PFN_vkGetInstanceProcAddr pfn_vkGetInstanceProcAddr;
+static PFN_vkGetDeviceProcAddr pfn_vkGetDeviceProcAddr;
+static inline bool init_vulkan_loader(void)
+{
+#ifdef _WIN32
+    HMODULE hmod;
+#else
+    void *mod;
+#endif
+
+    if (pfn_vkGetInstanceProcAddr)
+        return true;
+
+    if (pfn_vkGetDeviceProcAddr)
+        return true;
+
+#ifdef _WIN32
+    hmod = LoadLibraryA(SONAME_LIBVULKAN);
+    if (!hmod)
+        return false;
+
+    pfn_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void *)GetProcAddress(hmod, "vkGetInstanceProcAddr");
+    pfn_vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)(void *)GetProcAddress(hmod, "vkGetDeviceProcAddr");
+#else
+    mod = dlopen(SONAME_LIBVULKAN, RTLD_LAZY);
+    if (!mod)
+        return false;
+
+    pfn_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(mod, "vkGetInstanceProcAddr");
+    pfn_vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)dlsym(mod, "vkGetDeviceProcAddr");
+#endif
+
+    return pfn_vkGetInstanceProcAddr != NULL;
+}
 
 #if defined(_WIN32) && !defined(VKD3D_FORCE_UTILS_WRAPPER)
 static IUnknown *create_warp_adapter(IDXGIFactory4 *factory)
@@ -538,36 +573,12 @@ static inline bool is_amd_vulkan_device(ID3D12Device *device)
 {
     return false;
 }
-#else
 
-static PFN_vkGetInstanceProcAddr pfn_vkGetInstanceProcAddr;
-static bool init_vulkan_loader(void)
+static inline bool is_vk_device_extension_supported(ID3D12Device *device, const char *ext)
 {
-#ifdef _WIN32
-    HMODULE hmod;
-#else
-    void *mod;
-#endif
-
-    if (pfn_vkGetInstanceProcAddr)
-        return true;
-
-#ifdef _WIN32
-    hmod = LoadLibraryA(SONAME_LIBVULKAN);
-    if (!hmod)
-        return false;
-
-    pfn_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)GetProcAddress(hmod, "vkGetInstanceProcAddr");
-#else
-    mod = dlopen(SONAME_LIBVULKAN, RTLD_LAZY);
-    if (!mod)
-        return false;
-
-    pfn_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(mod, "vkGetInstanceProcAddr");
-#endif
-
-    return pfn_vkGetInstanceProcAddr != NULL;
+    return false;
 }
+#else
 
 static ID3D12Device *create_device(void)
 {
@@ -607,6 +618,46 @@ static bool get_driver_properties(ID3D12Device *device, VkPhysicalDeviceDriverPr
     device_properties2.pNext = driver_properties;
     pfn_vkGetPhysicalDeviceProperties2(vk_physical_device, &device_properties2);
     return true;
+}
+
+static inline bool is_vk_device_extension_supported(ID3D12Device *device, const char *ext)
+{
+    ID3D12DXVKInteropDevice *dxvk_device = NULL;
+    const char **exts = NULL;
+    bool supported = false;
+    UINT extension_count;
+    unsigned int i;
+
+    if (!init_vulkan_loader())
+        return false;
+
+    if (FAILED(ID3D12Device_QueryInterface(device, &IID_ID3D12DXVKInteropDevice, (void **)&dxvk_device)))
+        goto err;
+
+    if (FAILED(ID3D12DXVKInteropDevice_GetDeviceExtensions(dxvk_device, &extension_count, NULL)))
+        goto err;
+
+    exts = malloc(sizeof(*exts) * extension_count);
+    if (!exts)
+        goto err;
+
+    if (FAILED(ID3D12DXVKInteropDevice_GetDeviceExtensions(dxvk_device, &extension_count, exts)))
+        goto err;
+
+    for (i = 0; i < extension_count; i++)
+    {
+        if (!strcmp(ext, exts[i]))
+        {
+            supported = true;
+            break;
+        }
+    }
+
+err:
+    if (dxvk_device)
+        ID3D12DXVKInteropDevice_Release(dxvk_device);
+    free(exts);
+    return supported;
 }
 
 static inline void init_adapter_info(void)

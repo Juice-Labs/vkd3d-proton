@@ -418,23 +418,34 @@ static void d3d12_meta_command_exec_dstorage(struct d3d12_meta_command *meta_com
             meta_ops->dstorage.vk_emit_nv_memory_decompression_regions_layout,
             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_args), &push_args));
 
+    memset(&dep_info, 0, sizeof(dep_info));
+    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_info.memoryBarrierCount = 1;
+    dep_info.pMemoryBarriers = &vk_barrier;
+
+    /* This barrier is pure nonsense and should not be needed, but apparently it is anyway.
+     * FF XVI demo has a pattern of copy -> copy-to-uav barrier -> gdeflate.
+     * We're synchronized with UAV here, so this should work fine, but apparently it doesn't
+     * and this arbitrary COMPUTE -> COMPUTE barrier happens to work around the issue.
+     * I can only deduce this is a driver bug somehow with barrier emission. */
+    memset(&vk_barrier, 0, sizeof(vk_barrier));
+    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    vk_barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    vk_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
+
     workgroup_count = vkd3d_compute_workgroup_count(parameters->stream_count, 32);
     VK_CALL(vkCmdDispatch(list->cmd.vk_command_buffer, workgroup_count, 1, 1));
 
     /* Iterate over individual streams and dispatch another compute shader
      * that emits the actual VkDecompressMemoryRegionNV structures. */
-    memset(&vk_barrier, 0, sizeof(vk_barrier));
-    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     vk_barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
     vk_barrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
             VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
-
-    memset(&dep_info, 0, sizeof(dep_info));
-    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep_info.memoryBarrierCount = 1;
-    dep_info.pMemoryBarriers = &vk_barrier;
 
     VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
 
@@ -474,6 +485,16 @@ static void d3d12_meta_command_exec_dstorage(struct d3d12_meta_command *meta_com
 
     VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
 
+    VKD3D_BREADCRUMB_TAG("[Control VA + Size, Input VA + Size, Output VA + Size, Scratch VA + Size, StreamCount]");
+    VKD3D_BREADCRUMB_AUX64(parameters->control_buffer_va);
+    VKD3D_BREADCRUMB_AUX64(parameters->control_buffer_size);
+    VKD3D_BREADCRUMB_AUX64(parameters->input_buffer_va);
+    VKD3D_BREADCRUMB_AUX64(parameters->input_buffer_size);
+    VKD3D_BREADCRUMB_AUX64(parameters->output_buffer_va);
+    VKD3D_BREADCRUMB_AUX64(parameters->output_buffer_size);
+    VKD3D_BREADCRUMB_AUX64(parameters->scratch_buffer_va);
+    VKD3D_BREADCRUMB_AUX64(parameters->scratch_buffer_size);
+    VKD3D_BREADCRUMB_AUX32(parameters->stream_count);
     VKD3D_BREADCRUMB_COMMAND(DSTORAGE);
 }
 
@@ -484,24 +505,24 @@ static HRESULT d3d12_meta_command_create_dstorage(struct d3d12_meta_command *met
 
     if (parameter_size < sizeof(*parameters) || !parameters)
     {
-        FIXME("Invalid parameter set (size = %u, ptr = %p) for DirectStorage meta command.\n", parameter_size, parameters);
+        FIXME("Invalid parameter set (size = %zu, ptr = %p) for DirectStorage meta command.\n", parameter_size, parameters);
         return E_INVALIDARG;
     }
 
     if (parameters->version != 1)
     {
-        ERR("Unsupported version %u for DirectStorage meta command.\n", parameters->version);
+        ERR("Unsupported version %"PRIu64" for DirectStorage meta command.\n", parameters->version);
         return DXGI_ERROR_UNSUPPORTED;
     }
 
     if (parameters->format != 1)
     {
-        ERR("Unsupported format %u for DirectStorage meta command.\n", parameters->format);
+        ERR("Unsupported format %"PRIu64" for DirectStorage meta command.\n", parameters->format);
         return DXGI_ERROR_UNSUPPORTED;
     }
 
     if (parameters->flags != 0)
-        FIXME("Unrecognized flags %#x for DirectStorage meta command.\n", parameters->flags);
+        FIXME("Unrecognized flags %#"PRIx64" for DirectStorage meta command.\n", parameters->flags);
 
     meta_command->exec_proc = &d3d12_meta_command_exec_dstorage;
     return S_OK;

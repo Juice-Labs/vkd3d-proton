@@ -75,6 +75,12 @@ enum vkd3d_shader_meta_flags
     VKD3D_SHADER_META_FLAG_EMITS_LINES = 1 << 14,
     VKD3D_SHADER_META_FLAG_EMITS_TRIANGLES = 1 << 15,
     VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_AFTER_DISPATCH = 1 << 16,
+    VKD3D_SHADER_META_FLAG_EXPORTS_SAMPLE_MASK = 1 << 17,
+    VKD3D_SHADER_META_FLAG_FORCE_PRE_RASTERIZATION_BEFORE_DISPATCH = 1 << 18,
+    VKD3D_SHADER_META_FLAG_FORCE_GRAPHICS_BEFORE_DISPATCH = 1 << 19,
+    VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_BEFORE_DISPATCH = 1 << 20,
+    VKD3D_SHADER_META_FLAG_USES_DEPTH_STENCIL_WRITE = 1 << 21,
+    VKD3D_SHADER_META_FLAG_DISABLE_OPTIMIZATIONS = 1 << 22
 };
 
 struct vkd3d_shader_meta
@@ -82,7 +88,10 @@ struct vkd3d_shader_meta
     vkd3d_shader_hash_t hash;
     unsigned int cs_workgroup_size[3]; /* Only contains valid data if uses_subgroup_size is true. */
     unsigned int patch_vertex_count; /* Relevant for HS. May be 0, in which case the patch vertex count is not known. */
-    unsigned int cs_required_wave_size; /* If non-zero, force a specific CS subgroup size. */
+    uint8_t cs_wave_size_min; /* If non-zero, minimum or required subgroup size. */
+    uint8_t cs_wave_size_max; /* If non-zero, maximum subgroup size. */
+    uint8_t cs_wave_size_preferred; /* If non-zero, preferred subgroup size. */
+    uint8_t reserved;
     uint32_t flags; /* vkd3d_shader_meta_flags */
 };
 STATIC_ASSERT(sizeof(struct vkd3d_shader_meta) == 32);
@@ -220,6 +229,8 @@ enum vkd3d_shader_interface_flag
     VKD3D_SHADER_INTERFACE_DESCRIPTOR_QA_BUFFER             = 0x00000010u,
     /* In this model, use descriptor_size_cbv_srv_uav as array stride for raw VA buffer. */
     VKD3D_SHADER_INTERFACE_RAW_VA_ALIAS_DESCRIPTOR_BUFFER   = 0x00000020u,
+    VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER            = 0x00000040u,
+    VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER_FULL       = 0x00000080u,
 };
 
 struct vkd3d_shader_stage_io_entry
@@ -262,10 +273,10 @@ struct vkd3d_shader_interface_info
     const struct vkd3d_shader_descriptor_binding *offset_buffer_binding;
 
 #ifdef VKD3D_ENABLE_DESCRIPTOR_QA
-    /* Ignored unless VKD3D_SHADER_INTERFACE_DESCRIPTOR_QA_BUFFER is set. */
-    const struct vkd3d_shader_descriptor_binding *descriptor_qa_global_binding;
-    /* Ignored unless VKD3D_SHADER_INTERFACE_DESCRIPTOR_QA_BUFFER is set. */
-    const struct vkd3d_shader_descriptor_binding *descriptor_qa_heap_binding;
+    /* Ignored unless VKD3D_SHADER_INTERFACE_{DESCRIPTOR,INSTRUCTION}_QA_BUFFER is set. */
+    const struct vkd3d_shader_descriptor_binding *descriptor_qa_payload_binding;
+    /* Ignored unless VKD3D_SHADER_INTERFACE_{DESCRIPTOR,INSTRUCTION}_QA_BUFFER is set. */
+    const struct vkd3d_shader_descriptor_binding *descriptor_qa_control_binding;
 #endif
 
     const struct vkd3d_shader_stage_io_map *stage_input_map;
@@ -368,6 +379,10 @@ enum vkd3d_shader_target_extension
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP16_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP64_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_SUBGROUP_PARTITIONED_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_KHR,
+    VKD3D_SHADER_TARGET_EXTENSION_QUAD_CONTROL_RECONVERGENCE,
+    VKD3D_SHADER_TARGET_EXTENSION_RAW_ACCESS_CHAINS_NV,
     VKD3D_SHADER_TARGET_EXTENSION_COUNT,
 };
 
@@ -421,11 +436,20 @@ enum vkd3d_shader_quirk
     /* Driver workarounds. Force loops to not be unrolled with SPIR-V control masks. */
     VKD3D_SHADER_QUIRK_FORCE_LOOP = (1 << 13),
 
-    /* Requests META_FLAG_FORCE_COMPUTE_BARRIER_AFTER_DISPATCH to be set in shader meta. */
+    /* Requests META_FLAG_FORCE_COMPUTE_BARRIER_{AFTER,BEFORE}_DISPATCH to be set in shader meta. */
     VKD3D_SHADER_QUIRK_FORCE_COMPUTE_BARRIER = (1 << 14),
+    VKD3D_SHADER_QUIRK_FORCE_PRE_COMPUTE_BARRIER = (1 << 15),
 
     /* Range check every descriptor heap access with dynamic index and robustness check it. */
-    VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS = (1 << 15),
+    VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS = (1 << 16),
+
+    /* Requests META_FLAG_FORCE_PRE_RASTERIZATION_BEFORE_DISPATCH to be set in shader meta. */
+    VKD3D_SHADER_QUIRK_FORCE_PRE_RASTERIZATION_BARRIER = (1 << 17),
+    /* Requests META_FLAG_FORCE_GRAPHICS_BEFORE_DISPATCH to be set in shader meta. */
+    VKD3D_SHADER_QUIRK_FORCE_GRAPHICS_BARRIER = (1 << 18),
+
+    /* VK_PIPELINE_CREATE_DISABLE_OPTIMIZATIONS. For driver workarounds where optimizations break stuff. */
+    VKD3D_SHADER_QUIRK_DISABLE_OPTIMIZATIONS = (1 << 19)
 };
 
 struct vkd3d_shader_quirk_hash
@@ -464,6 +488,9 @@ struct vkd3d_shader_compile_arguments
     bool promote_wave_size_heuristics;
 
     const struct vkd3d_shader_quirk_info *quirks;
+    /* Only non-zero when enabled by vkd3d_config */
+    VkDriverId driver_id;
+    uint32_t driver_version;
 };
 
 enum vkd3d_tessellator_output_primitive
@@ -849,6 +876,8 @@ enum vkd3d_sysval_semantic
     VKD3D_SV_TESS_FACTOR_TRIINT        = 14,
     VKD3D_SV_TESS_FACTOR_LINEDET       = 15,
     VKD3D_SV_TESS_FACTOR_LINEDEN       = 16,
+    VKD3D_SV_BARYCENTRICS              = 23,
+    VKD3D_SV_SHADING_RATE              = 24,
 
     VKD3D_FORCE_32_BIT_ENUM(VKD3D_SYSVAL_SEMANTIC),
 };
@@ -929,6 +958,8 @@ int vkd3d_shader_scan_dxbc(const struct vkd3d_shader_code *dxbc,
 int vkd3d_shader_parse_input_signature(const struct vkd3d_shader_code *dxbc,
         struct vkd3d_shader_signature *signature);
 int vkd3d_shader_parse_output_signature(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_shader_signature *signature);
+int vkd3d_shader_parse_patch_constant_signature(const struct vkd3d_shader_code *dxbc,
         struct vkd3d_shader_signature *signature);
 struct vkd3d_shader_signature_element *vkd3d_shader_find_signature_element(
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
@@ -1062,6 +1093,19 @@ typedef struct vkd3d_shader_signature_element * (*PFN_vkd3d_shader_find_signatur
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
         unsigned int semantic_index, unsigned int stream_index);
 typedef void (*PFN_vkd3d_shader_free_shader_signature)(struct vkd3d_shader_signature *signature);
+
+int vkd3d_shader_parse_root_signature_v_1_0(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+
+vkd3d_shader_hash_t vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+        const struct vkd3d_root_signature_desc2 *desc);
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,134 @@
 # Change Log
 
+## 2.13
+
+### Features
+
+- Implement Shader Model 6.8 min-spec
+  - `SV_StartInstanceLocation`
+  - `SV_StartVertexLocation`
+  - WaveSize range
+  - Implement Vulkan texturing catch-up features (esoteric comparison sampling functions)
+- Implement interop for OpenVR / OpenXR on Proton
+- Correctly support `NULL` index buffers with `VK_KHR_maintenance6`.
+- Implement `VK_MESA_image_alignment_control`. Reduces memory bloat on AMD cards in particular.
+
+### Fixes
+
+- Reimplement `VK_NV_low_latency2` to fix some issues with heavy stuttering caused by non-monotonic frame IDs.
+  Relies on a more recent dxvk-nvapi which can paper over API design issues in Reflex API.
+  Requires a more recent NVIDIA driver which fixes some bugs exposed in this new code.
+  On older NVIDIA drivers, it should *run*, but low-latency will not kick in as expected.
+- Explicitly disable variable-rate shading when depth-stencil is written in shader.
+  Fixes glitched hair rendering in Hellblade 2.
+- Correctly expose MSAA features for depth-stencil. Fixes Arma Reforger.
+- Fix bugs in MSAA resolve implementation when dealing with custom resolve formats. Fixes Arma Reforger.
+- Fix validation error in internal query resolve shader.
+- Fix some bugs in wave-ops where helper lanes participated where they were not supposed to.
+  Fixes some WaveMatch / WaveMultiPrefix use-cases in the wild.
+- Various dxil-spirv fixes to fix invalid control-flow as always.
+
+### Performance
+
+- Tweak how we opt-in to ReBAR for UPLOAD heaps. Now, only > 8 GB cards will get it.
+  On 8 GB cards, we were regularly hitting the upper limits of what the GPU could hold in VRAM,
+  and using ReBAR would be detrimental to performance since there was risk of more important
+  memory being demoted to system memory. Works well together with `VK_MESA_image_alignment_control`
+  to free up significant amounts of VRAM. Performance gains from ReBAR on 8 GB were also found to be minimal
+  compared to the larger GPUs since we quickly exhausted the limited 512 MiB budget anyway.
+- Sub-allocate small image heaps. Avoids heavy stutter in Ghost of Tsushima on desktop.
+  (Steam Deck code path does not seem to use small heaps to begin with).
+- Improve performance with ROV when used with more complicated shader code patterns.
+
+### Workarounds
+
+- Implement a crude workaround for depth-stencil sparse and MSAA sparse.
+  - Just allocates a committed resource instead. Not correct, but good enough band-aid.
+  - Allows SottR to run on RADV.
+- Disable NV_dgcc on Halo Infinite on NV drivers.
+- Workaround a missing barrier in AC: Mirage causing random corrupt geometry.
+
+### Misc
+
+- Split vkd3d-proton shader cache up by .exe name when using a unified directory with `VKD3D_SHADER_CACHE_PATH`.
+- Implement `VK_EXT_device_address_binding_report`.
+
+## 2.12
+
+### Features
+
+- Implement support for NVIDIA Reflex through `VK_NV_low_latency2`. Thanks to NVIDIA for contributing implementation
+- Implement D3D12 render pass API (tier 0)
+- Implement ID3D12DeviceRemovedExtendedDataSettings stubs. Fixes some games that rely on this existing
+- Implement `VK_EXT_device_fault`. Makes it possible to grab fault information and vendor binary if supported
+- Implement `VK_EXT_swapchain_maintenance1`
+  - Allows seamless transition between V-Sync and tearing present modes without stutter
+  - Implemented on both Mesa and NV drivers
+- Expose Shader Model 6.7 by default if
+  `VK_KHR_shader_maximal_reconvergence` and `VK_KHR_shader_quad_control` are supported
+- Add optimized descriptor copy path on Intel Arc GPUs that support `VK_EXT_descriptor_buffer`
+- Implement fallback for compute shader derivatives on NVIDIA Pascal and older GPUs.
+  Allows exposing Shader Model 6.7 by default on Pascal as well (albeit with some known cases where it does not work).
+  The workaround is expected to work with any known use of SM 6.6 compute derivatives in the wild
+
+### Fixes
+
+- Fix Atlas Fallen black screen due to edge case with MinLODClamp
+- Correctly disable alpha-to-coverage if sampler mask is exported
+- Fix format feature reports for `DXGI_FORMAT_UNKNOWN`
+- Relax root signature compatibility rules when compiling Ray Tracing pipelines.
+  Fixes GPU hang on NV in Warhammer: Darktide
+- Fix GPU hang on NV in UE5 Lyra demo
+- Explicitly validate stage IO signatures in PSO creation similar to native D3D12 runtime.
+  Fixes some scenarios where a game attempts to create an invalid pipeline that should have failed creation
+  on native D3D12
+
+### Workarounds
+
+- Workaround crash in Resident Evil 4 RT mode when tessellation is enabled
+- Workaround mesh shader glitches on NVIDIA in several UE5 titles
+- Workaround GPU hang on NVIDIA in World of Warcraft when MSAA is enabled
+- Disable RT by default in Persona 3 Reload on Deck
+
+### Performance
+
+- Implement `VK_NV_raw_access_chains`. Significantly improves GPU performance on NV GPUs in some games.
+  Games using DXBC instead of DXIL are expected to see more improvements.
+  Not all games are expected to see an uplift
+- Fix extremely poor GPU performance in some locations in Persona 3 Reload
+
+### Debug
+
+- Add support for `VKD3D_QUEUE_PROFILE`, a simple system profiling method
+  - Includes `VK_NV_low_latency2` support to debug NVIDIA Reflex sleeps
+- Root signature blobs are also dumped when dumping shaders
+  - A simple CLI tool to inspect the root-sig blobs is included in `programs/`
+- Misc improvements to breadcrumbs, debug ring, etc
+- Pipeline creation failure now dumps PSO creation commands in log
+
+## 2.11.1
+
+This release is a minor bug-fix release before the holidays.
+
+- Implement COLOR -> STENCIL fallback copy on NVIDIA
+- Implement SM 6.6 ResourceDescriptorHeap[] + UAV counters correctly on RADV
+- Fix bugged implementation of DXBC resinfo instruction, affecting Avatar: Frontiers of Pandora
+- Fix memory type used for DGC preprocess memory on NVIDIA (~5% performance, YMMV)
+- Fix crash in Callisto Protocol when booting game with DXR support
+ 
+#### More complete MSAA resolve implementation
+
+- Add depth-stencil resolve
+- Support typeless formats
+- Add MIN/MAX resolve modes
+- Implement missing code paths on NVIDIA
+ 
+#### Workarounds
+
+- Update workaround for GPU hang in CP77 when using DXR for patch 2.1.
+- Remove workaround for NO_DGCC in Halo Infinite on NVIDIA.
+- Workaround game bug in Pioneers of Pagonia causing GPU hangs on RADV.
+
 ## 2.11
 
 This release rolls up a bunch of features, perf improvements and bug fixes / workarounds as usual.

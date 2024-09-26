@@ -63,13 +63,13 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_SINGLE_QUEUE (1ull << 5)
 #define VKD3D_CONFIG_FLAG_DESCRIPTOR_QA_CHECKS (1ull << 6)
 #define VKD3D_CONFIG_FLAG_NO_DXR (1ull << 7)
-/* Bit 8 is vacant */
+#define VKD3D_CONFIG_FLAG_FAULT (1ull << 8)
 #define VKD3D_CONFIG_FLAG_FORCE_MINIMUM_SUBGROUP_SIZE (1ull << 9)
 #define VKD3D_CONFIG_FLAG_NO_UPLOAD_HVV (1ull << 10)
 #define VKD3D_CONFIG_FLAG_LOG_MEMORY_BUDGET (1ull << 11)
-/* Bit 12 is vacant */
+#define VKD3D_CONFIG_FLAG_BREADCRUMBS_SYNC (1ull << 12)
 #define VKD3D_CONFIG_FLAG_FORCE_HOST_CACHED (1ull << 13)
-/* Bit 14 is vacant */
+#define VKD3D_CONFIG_FLAG_APP_DEBUG_MARKER_ONLY (1ull << 14)
 #define VKD3D_CONFIG_FLAG_FORCE_NO_INVARIANT_POSITION (1ull << 15)
 #define VKD3D_CONFIG_FLAG_GLOBAL_PIPELINE_CACHE (1ull << 16)
 #define VKD3D_CONFIG_FLAG_PIPELINE_LIBRARY_NO_SERIALIZE_SPIRV (1ull << 17)
@@ -101,6 +101,14 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_DISABLE_UAV_COMPRESSION (1ull << 43)
 #define VKD3D_CONFIG_FLAG_DISABLE_DEPTH_COMPRESSION (1ull << 44)
 #define VKD3D_CONFIG_FLAG_DISABLE_COLOR_COMPRESSION (1ull << 45)
+#define VKD3D_CONFIG_FLAG_DISABLE_NV_DGCC (1ull << 46)
+#define VKD3D_CONFIG_FLAG_MEMORY_ALLOCATOR_SKIP_IMAGE_HEAP_CLEAR (1ull << 47)
+#define VKD3D_CONFIG_FLAG_DRIVER_VERSION_SENSITIVE_SHADERS (1ull << 48)
+#define VKD3D_CONFIG_FLAG_SMALL_VRAM_REBAR (1ull << 49)
+#define VKD3D_CONFIG_FLAG_NO_STAGGERED_SUBMIT (1ull << 50)
+#define VKD3D_CONFIG_FLAG_CLEAR_UAV_SYNC (1ull << 51)
+#define VKD3D_CONFIG_FLAG_FORCE_DYNAMIC_MSAA (1ull << 52)
+#define VKD3D_CONFIG_FLAG_INSTRUCTION_QA_CHECKS (1ull << 53)
 
 struct vkd3d_instance;
 
@@ -157,6 +165,8 @@ VkPhysicalDevice vkd3d_get_vk_physical_device(ID3D12Device *device);
 struct vkd3d_instance *vkd3d_instance_from_device(ID3D12Device *device);
 
 uint32_t vkd3d_get_vk_queue_family_index(ID3D12CommandQueue *queue);
+uint32_t vkd3d_get_vk_queue_index(ID3D12CommandQueue *queue);
+uint32_t vkd3d_get_vk_queue_flags(ID3D12CommandQueue *queue);
 VkQueue vkd3d_acquire_vk_queue(ID3D12CommandQueue *queue);
 void vkd3d_release_vk_queue(ID3D12CommandQueue *queue);
 void vkd3d_enqueue_initial_transition(ID3D12CommandQueue *queue, ID3D12Resource *resource);

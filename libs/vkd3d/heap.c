@@ -281,6 +281,17 @@ static HRESULT d3d12_heap_init(struct d3d12_heap *heap, struct d3d12_device *dev
     alloc_info.host_ptr = host_address;
     alloc_info.extra_allocation_flags = 0;
 
+    if ((alloc_info.heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS) &&
+            device->d3d12_caps.options.ResourceHeapTier >= D3D12_RESOURCE_HEAP_TIER_2)
+    {
+        alloc_info.extra_allocation_flags = VKD3D_ALLOCATION_FLAG_ALLOW_IMAGE_SUBALLOCATION;
+    }
+
+    /* Buffers are far more sensitive to memory clears than images. */
+    if ((alloc_info.heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS) &&
+            (vkd3d_config_flags & VKD3D_CONFIG_FLAG_MEMORY_ALLOCATOR_SKIP_IMAGE_HEAP_CLEAR))
+        alloc_info.heap_desc.Flags |= D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
+
     if (FAILED(hr = vkd3d_private_store_init(&heap->private_store)))
         return hr;
 
@@ -316,6 +327,9 @@ static HRESULT d3d12_heap_init(struct d3d12_heap *heap, struct d3d12_device *dev
         device->device_info.pageable_device_memory_features.pageableDeviceLocalMemory &&
         heap->allocation.chunk == NULL /* not suballocated */ &&
         (device->memory_properties.memoryTypes[heap->allocation.device_allocation.vk_memory_type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    vkd3d_queue_timeline_trace_register_instantaneous(&device->queue_timeline_trace,
+            VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_HEAP_ALLOCATION, desc->SizeInBytes);
 
     d3d12_device_add_ref(heap->device);
     return S_OK;

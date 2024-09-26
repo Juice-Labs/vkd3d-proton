@@ -23,6 +23,7 @@
 
 #define VK_NO_PROTOTYPES
 #ifdef _WIN32
+#include <stdio.h>
 #include "vkd3d_win32.h"
 #endif
 #include "vkd3d_sonames.h"
@@ -32,17 +33,13 @@
 #include "vkd3d_threads.h"
 #include "vkd3d_core_interface.h"
 
-/* We need to specify the __declspec(dllexport) attribute
- * on MinGW because otherwise the stdcall aliases/fixups
- * don't get exported.
- */
-#if defined(_MSC_VER)
-  #define DLLEXPORT
-#elif defined(__MINGW32__)
-  #define DLLEXPORT __declspec(dllexport)
+#include "debug.h"
+
+#if defined(__WINE__) || !defined(_WIN32)
+#define DLLEXPORT __attribute__((visibility("default")))
+#include <dlfcn.h>
 #else
-  #define DLLEXPORT __attribute__((visibility("default")))
-  #include <dlfcn.h>
+#define DLLEXPORT
 #endif
 
 typedef IVKD3DCoreInterface d3d12core_interface;
@@ -52,13 +49,248 @@ static pthread_once_t library_once = PTHREAD_ONCE_INIT;
 
 #ifdef _WIN32
 static HMODULE vulkan_module = NULL;
+static HMODULE wineopenxr_module = NULL;
+typedef int (WINAPI *PFN___wineopenxr_GetVulkanExtensions)(uint32_t, uint32_t *, char *);
+PFN___wineopenxr_GetVulkanExtensions p___wineopenxr_GetVulkanInstanceExtensions = NULL;
+PFN___wineopenxr_GetVulkanExtensions p___wineopenxr_GetVulkanDeviceExtensions = NULL;
 #else
 static void *vulkan_module = NULL;
 #endif
 static PFN_vkGetInstanceProcAddr vulkan_vkGetInstanceProcAddr = NULL;
 
-static void load_vulkan_once(void)
+#ifdef _WIN32
+static BOOL wait_vr_key(HKEY vr_key)
 {
+    DWORD type, value, wait_status, size;
+    DWORD max_retry = 10; /* Each value query and each timeout counts as a try. */
+    LSTATUS status;
+    HANDLE event;
+
+    size = sizeof(value);
+    if ((status = RegQueryValueExA(vr_key, "state", NULL, &type, (BYTE *)&value, &size)))
+    {
+        ERR("OpenVR: could not query value, status %d.\n", status);
+        return false;
+    }
+    if (type != REG_DWORD)
+    {
+        ERR("OpenVR: unexpected value type %d.\n", type);
+        return false;
+    }
+
+    if (value)
+        return value == 1;
+
+    event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (event == NULL)
+    {
+        ERR("Cannot create event.\n");
+        return false;
+    }
+
+    while (max_retry)
+    {
+        if (RegNotifyChangeKeyValue(vr_key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, event, TRUE))
+        {
+            ERR("Error registering registry change notification.\n");
+            break;
+        }
+        size = sizeof(value);
+        if ((status = RegQueryValueExA(vr_key, "state", NULL, &type, (BYTE *)&value, &size)))
+        {
+            ERR("OpenVR: could not query value, status %d.\n", status);
+            break;
+        }
+        if (value)
+            break;
+        max_retry--;
+
+        while ((wait_status = WaitForSingleObject(event, 1000)) == WAIT_TIMEOUT && max_retry)
+        {
+            WARN("VR state wait timeout (retries left %u).\n", max_retry);
+            max_retry--;
+        }
+
+        if (wait_status != WAIT_OBJECT_0 && wait_status != WAIT_TIMEOUT)
+        {
+            ERR("Got unexpected wait status %u.\n", wait_status);
+            break;
+        }
+    }
+
+    CloseHandle(event);
+    return value == 1;
+}
+
+static char *openvr_instance_extensions()
+{
+    HKEY vr_key;
+
+    LSTATUS status = RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Wine\\VR", &vr_key);
+    char *openvr_instance_extensions = NULL;
+    DWORD len = 0, type;
+
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to open VR registry key, status %d.\n", status);
+        return NULL;
+    }
+    if (!wait_vr_key(vr_key))
+    {
+        WARN("Failed to wait for VR registry key ready.\n");
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+
+    status = RegQueryValueExA(vr_key, "openvr_vulkan_instance_extensions", NULL, &type, NULL, &len);
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to query VR instance extensions, status %d.\n", status);
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+    if (type != REG_SZ)
+    {
+        WARN("Unexpected VR instance extensions type %d.\n", type);
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+    openvr_instance_extensions = vkd3d_calloc(len, sizeof(BYTE));
+    status = RegQueryValueExA(vr_key, "openvr_vulkan_instance_extensions", NULL, &type, (BYTE *)openvr_instance_extensions, &len);
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to query VR instance extensions, status %d.\n", status);
+        vkd3d_free(openvr_instance_extensions);
+        openvr_instance_extensions = NULL;
+    }
+    RegCloseKey(vr_key);
+    return openvr_instance_extensions;
+}
+
+static char *openvr_device_extensions(DXGI_ADAPTER_DESC *desc)
+{
+    HKEY vr_key;
+
+    LSTATUS status = RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Wine\\VR", &vr_key);
+    char *openvr_device_extensions = NULL;
+    DWORD len = 0, type;
+    char key_name[32];
+
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to open VR registry key, status %d.\n", status);
+        return NULL;
+    }
+    if (!wait_vr_key(vr_key))
+    {
+        WARN("Failed to wait for VR registry key ready.\n");
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+
+    snprintf(key_name, sizeof(key_name), "PCIID:%04x:%04x", desc->VendorId, desc->DeviceId);
+
+    status = RegQueryValueExA(vr_key, key_name, NULL, &type, NULL, &len);
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to query VR instance extensions, status %d.\n", status);
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+    if (type != REG_SZ)
+    {
+        WARN("Unexpected VR instance extensions type %d.\n", type);
+        RegCloseKey(vr_key);
+        return NULL;
+    }
+    openvr_device_extensions = vkd3d_calloc(len, sizeof(BYTE));
+    status = RegQueryValueExA(vr_key, key_name, NULL, &type, (BYTE *)openvr_device_extensions, &len);
+    if (status != ERROR_SUCCESS)
+    {
+        WARN("Failed to query VR instance extensions, status %d.\n", status);
+        vkd3d_free(openvr_device_extensions);
+        openvr_device_extensions = NULL;
+    }
+    RegCloseKey(vr_key);
+    return openvr_device_extensions;
+}
+
+static char *openxr_vulkan_extensions(bool device_extensions)
+{
+    PFN___wineopenxr_GetVulkanExtensions get_extensions = NULL;
+    char *ret = NULL;
+    uint32_t len;
+
+    get_extensions = device_extensions ? p___wineopenxr_GetVulkanDeviceExtensions
+                                       : p___wineopenxr_GetVulkanInstanceExtensions;
+    if (!get_extensions)
+    {
+        WARN("wineopenxr.dll is missing required symbols.\n");
+        return NULL;
+    }
+
+    if (get_extensions(0, &len, NULL))
+    {
+        WARN("Failed to get OpenXR extensions size from wineopenxr.\n");
+        return NULL;
+    }
+
+    ret = vkd3d_malloc(len);
+    if (get_extensions(len, &len, ret))
+    {
+        WARN("Failed to get OpenXR extensions from wineopenxr.\n");
+        return NULL;
+    }
+    return ret;
+}
+
+static uint32_t parse_extension_list(char *extension_str, char **extension_list)
+{
+    char *cursor = extension_str;
+    uint32_t count = 0;
+
+    if (!cursor)
+        return 0;
+
+    while (*cursor)
+    {
+        char *next = strchr(cursor, ' ');
+        count++;
+        if (!next)
+            break;
+        cursor = next + 1;
+    }
+
+    if (!extension_list)
+        return count;
+
+    cursor = extension_str;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        char *next = strchr(cursor, ' ');
+        extension_list[i] = cursor;
+        if (!next)
+            break;
+        *next = '\0';
+        cursor = next + 1;
+    }
+    return count;
+}
+#endif
+
+static void load_modules_once(void)
+{
+#ifdef _WIN32
+    if (!wineopenxr_module)
+        wineopenxr_module = LoadLibraryA("wineopenxr.dll");
+    if (wineopenxr_module)
+    {
+        p___wineopenxr_GetVulkanDeviceExtensions =
+                (void *)GetProcAddress(wineopenxr_module, "__wineopenxr_GetVulkanDeviceExtensions");
+        p___wineopenxr_GetVulkanInstanceExtensions =
+                (void *)GetProcAddress(wineopenxr_module, "__wineopenxr_GetVulkanInstanceExtensions");
+    }
+#endif
     if (!vulkan_module)
     {
 #ifdef _WIN32
@@ -94,9 +326,9 @@ static void load_vulkan_once(void)
     }
 }
 
-static bool load_vulkan(void)
+static bool load_modules(void)
 {
-    pthread_once(&library_once, load_vulkan_once);
+    pthread_once(&library_once, load_modules_once);
     return vulkan_vkGetInstanceProcAddr != NULL;
 }
 
@@ -148,9 +380,10 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
     VkPhysicalDeviceProperties2 properties2;
     VkPhysicalDevice *vk_physical_devices;
     VkInstance vk_instance;
-    unsigned int i;
+    unsigned int i, j;
     uint32_t count;
     VkResult vr;
+    bool match;
 
     vk_instance = vkd3d_instance_get_vk_instance(instance);
 
@@ -184,7 +417,7 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
         /* Skip over physical devices below our minimum API version */
         if (properties2.properties.apiVersion < VKD3D_MIN_API_VERSION)
         {
-            WARN("Skipped adapter %s as it is below our minimum API version.", properties2.properties.deviceName);
+            WARN("Skipped adapter %s as it is below our minimum API version.\n", properties2.properties.deviceName);
             continue;
         }
 
@@ -198,8 +431,33 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
 
         if (id_properties.deviceLUIDValid && !memcmp(id_properties.deviceLUID, &adapter_desc->AdapterLuid, VK_LUID_SIZE))
         {
-            vk_physical_device = vk_physical_devices[i];
-            break;
+            match = true;
+
+            if (vk_physical_device)
+            {
+                WARN("Multiple adapters found with LUID %#x%x.\n", adapter_desc->AdapterLuid.HighPart, adapter_desc->AdapterLuid.LowPart);
+
+                match = properties2.properties.deviceID == adapter_desc->DeviceId &&
+                        properties2.properties.vendorID == adapter_desc->VendorId;
+
+                if (!match)
+                {
+                    /* For simplicity, assume that adapter names are all ASCII characters */
+                    match = true;
+
+                    for (j = 0; j < ARRAY_SIZE(adapter_desc->Description); j++)
+                    {
+                        WCHAR a = (WCHAR)properties2.properties.deviceName[j];
+                        WCHAR b = adapter_desc->Description[j];
+
+                        if (!(match = (a == b)) || !a || !b)
+                          break;
+                    }
+                }
+            }
+
+            if (match)
+                vk_physical_device = vk_physical_devices[i];
         }
     }
 
@@ -249,7 +507,17 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
 #endif
     };
 
-    if (!load_vulkan())
+    static const char * const optional_instance_extensions[] =
+    {
+        VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME,
+        VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+    };
+#ifdef _WIN32
+    char *openvr_extensions, *openxr_extensions;
+    uint32_t vr_extension_count;
+#endif
+
+    if (!load_modules())
     {
         ERR("Failed to load Vulkan library.\n");
         return E_FAIL;
@@ -259,11 +527,35 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
     instance_create_info.pfn_vkGetInstanceProcAddr = vulkan_vkGetInstanceProcAddr;
     instance_create_info.instance_extensions = instance_extensions;
     instance_create_info.instance_extension_count = ARRAY_SIZE(instance_extensions);
-    instance_create_info.optional_instance_extensions = NULL;
-    instance_create_info.optional_instance_extension_count = 0;
+    instance_create_info.optional_instance_extensions = optional_instance_extensions;
+    instance_create_info.optional_instance_extension_count = ARRAY_SIZE(optional_instance_extensions);
+
+#ifdef _WIN32
+    openvr_extensions = openvr_instance_extensions();
+    openxr_extensions = openxr_vulkan_extensions(false);
+    vr_extension_count = parse_extension_list(openvr_extensions, NULL) + parse_extension_list(openxr_extensions, NULL);
+    if (vr_extension_count > 0)
+    {
+        size_t len = ARRAY_SIZE(instance_extensions) + vr_extension_count;
+        uint32_t offset = ARRAY_SIZE(instance_extensions);
+        char **extensions = calloc(len, sizeof(char *));
+        memcpy(extensions, instance_extensions, sizeof(char *) * ARRAY_SIZE(instance_extensions));
+        offset += parse_extension_list(openvr_extensions, extensions + offset);
+        parse_extension_list(openxr_extensions, extensions + offset);
+        instance_create_info.instance_extensions = (const char *const *)extensions;
+        instance_create_info.instance_extension_count = len;
+    }
+#endif
 
     if (FAILED(hr = vkd3d_create_instance(&instance_create_info, out_instance)))
         WARN("Failed to create vkd3d instance, hr %#x.\n", hr);
+
+#ifdef _WIN32
+    if (instance_create_info.instance_extensions != instance_extensions)
+        vkd3d_free((void *)instance_create_info.instance_extensions);
+    vkd3d_free(openvr_extensions);
+    vkd3d_free(openxr_extensions);
+#endif
 
     return hr;
 }
@@ -276,14 +568,20 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDevice(d3d12core_interface *cor
     HRESULT hr;
 
 #ifdef _WIN32
+    char *openvr_extensions, *openxr_extensions;
     struct DXGI_ADAPTER_DESC adapter_desc;
+    uint32_t vr_extension_count;
     IDXGIAdapter *dxgi_adapter;
 #endif
 
     static const char * const device_extensions[] =
     {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME,
+    };
+
+    static const char * const optional_device_extensions[] =
+    {
+        VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
     };
 
     TRACE("adapter %p, minimum_feature_level %#x, iid %s, device %p.\n",
@@ -313,19 +611,39 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDevice(d3d12core_interface *cor
     device_create_info.instance_create_info = NULL;
     device_create_info.device_extensions = device_extensions;
     device_create_info.device_extension_count = ARRAY_SIZE(device_extensions);
-    device_create_info.optional_device_extensions = NULL;
-    device_create_info.optional_device_extension_count = 0;
+    device_create_info.optional_device_extensions = optional_device_extensions;
+    device_create_info.optional_device_extension_count = ARRAY_SIZE(optional_device_extensions);
 
 #ifdef _WIN32
     device_create_info.vk_physical_device = d3d12_find_physical_device(instance, vulkan_vkGetInstanceProcAddr, &adapter_desc);
     device_create_info.parent = (IUnknown *)dxgi_adapter;
     memcpy(&device_create_info.adapter_luid, &adapter_desc.AdapterLuid, VK_LUID_SIZE);
+
+    openvr_extensions = openvr_device_extensions(&adapter_desc);
+    openxr_extensions = openxr_vulkan_extensions(true);
+    vr_extension_count = parse_extension_list(openvr_extensions, NULL) + parse_extension_list(openxr_extensions, NULL);
+    if (vr_extension_count > 0)
+    {
+        size_t len = ARRAY_SIZE(device_extensions) + vr_extension_count;
+        uint32_t offset = ARRAY_SIZE(device_extensions);
+        char **extensions = calloc(len, sizeof(char *));
+        memcpy(extensions, device_extensions, sizeof(char *) * ARRAY_SIZE(device_extensions));
+        offset += parse_extension_list(openvr_extensions, extensions + offset);
+        parse_extension_list(openxr_extensions, extensions + offset);
+        device_create_info.device_extensions = (const char *const *)extensions;
+        device_create_info.device_extension_count = len;
+    }
 #endif
 
     hr = vkd3d_create_device(&device_create_info, iid, device);
     vkd3d_instance_decref(instance);
 
 #ifdef _WIN32
+    if (device_create_info.device_extensions != device_extensions)
+        vkd3d_free((void *)device_create_info.device_extensions);
+    vkd3d_free(openvr_extensions);
+    vkd3d_free(openxr_extensions);
+
 out_release_adapter:
     IDXGIAdapter_Release(dxgi_adapter);
 #endif
@@ -370,10 +688,20 @@ HRESULT STDMETHODCALLTYPE d3d12core_SerializeVersionedRootSignature(d3d12core_in
 HRESULT STDMETHODCALLTYPE d3d12core_GetDebugInterface(d3d12core_interface *core,
         REFIID iid, void** debug)
 {
+    ID3D12DeviceRemovedExtendedDataSettings *dred_settings;
+    HRESULT hr;
+
     TRACE("iid %s, debug %p.\n", debugstr_guid(iid), debug);
 
     if (debug)
         *debug = NULL;
+
+    if (!memcmp(iid, &IID_ID3D12DeviceRemovedExtendedDataSettings, sizeof(*iid)))
+    {
+        hr = d3d12_dred_settings_create(&dred_settings);
+        *debug = dred_settings;
+        return hr;
+    }
 
     WARN("Returning DXGI_ERROR_SDK_COMPONENT_MISSING.\n");
     return DXGI_ERROR_SDK_COMPONENT_MISSING;

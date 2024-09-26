@@ -557,7 +557,9 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
         const struct vkd3d_shader_interface_info *shader_interface_info,
         const struct vkd3d_shader_compile_arguments *compiler_args)
 {
+    dxil_spv_option_compute_shader_derivatives compute_shader_derivatives = {{ DXIL_SPV_OPTION_COMPUTE_SHADER_DERIVATIVES }};
     dxil_spv_option_denorm_preserve_support denorm_preserve = {{ DXIL_SPV_OPTION_DENORM_PRESERVE_SUPPORT }};
+    uint32_t wave_size_min, wave_size_max, wave_size_preferred;
     struct vkd3d_dxil_remap_userdata remap_userdata;
     unsigned int raw_va_binding_count = 0;
     unsigned int num_root_descriptors = 0;
@@ -589,6 +591,12 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
     quirks = vkd3d_shader_compile_arguments_select_quirks(compiler_args, hash);
     if (quirks & VKD3D_SHADER_QUIRK_FORCE_COMPUTE_BARRIER)
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_AFTER_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_PRE_RASTERIZATION_BARRIER)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_PRE_RASTERIZATION_BEFORE_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_GRAPHICS_BARRIER)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_GRAPHICS_BEFORE_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_DISABLE_OPTIMIZATIONS)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_DISABLE_OPTIMIZATIONS;
 
     dxil_spv_begin_thread_allocator_context();
 
@@ -714,14 +722,36 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
         helper.enabled = DXIL_SPV_TRUE;
         helper.version = DXIL_SPV_DESCRIPTOR_QA_INTERFACE_VERSION;
         helper.shader_hash = hash;
-        helper.global_desc_set = shader_interface_info->descriptor_qa_global_binding->set;
-        helper.global_binding = shader_interface_info->descriptor_qa_global_binding->binding;
-        helper.heap_desc_set = shader_interface_info->descriptor_qa_heap_binding->set;
-        helper.heap_binding = shader_interface_info->descriptor_qa_heap_binding->binding;
+        helper.global_desc_set = shader_interface_info->descriptor_qa_payload_binding->set;
+        helper.global_binding = shader_interface_info->descriptor_qa_payload_binding->binding;
+        helper.heap_desc_set = shader_interface_info->descriptor_qa_control_binding->set;
+        helper.heap_binding = shader_interface_info->descriptor_qa_control_binding->binding;
 
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             ERR("dxil-spirv does not support DESCRIPTOR_QA_BUFFER.\n");
+            ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+            goto end;
+        }
+    }
+    else if (shader_interface_info->flags & VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER)
+    {
+        struct dxil_spv_option_instruction_instrumentation helper;
+        helper.base.type = DXIL_SPV_OPTION_INSTRUCTION_INSTRUMENTATION;
+        helper.enabled = DXIL_SPV_TRUE;
+        helper.version = DXIL_SPV_INSTRUCTION_INSTRUMENTATION_INTERFACE_VERSION;
+        helper.shader_hash = hash;
+        helper.payload_desc_set = shader_interface_info->descriptor_qa_payload_binding->set;
+        helper.payload_binding = shader_interface_info->descriptor_qa_payload_binding->binding;
+        helper.control_desc_set = shader_interface_info->descriptor_qa_control_binding->set;
+        helper.control_binding = shader_interface_info->descriptor_qa_control_binding->binding;
+        helper.type = DXIL_SPV_INSTRUCTION_INSTRUMENTATION_TYPE_EXTERNALLY_VISIBLE_WRITE_NAN_INF;
+        if (shader_interface_info->flags & VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER_FULL)
+            helper.type = DXIL_SPV_INSTRUCTION_INSTRUMENTATION_TYPE_FULL_NAN_INF;
+
+        if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
+        {
+            ERR("dxil-spirv does not support INSTRUCTION_INSTRUMENTATION.\n");
             ret = VKD3D_ERROR_NOT_IMPLEMENTED;
             goto end;
         }
@@ -889,6 +919,14 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
                     goto end;
                 }
             }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_NV)
+            {
+                compute_shader_derivatives.supports_nv = DXIL_SPV_TRUE;
+            }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_KHR)
+            {
+                compute_shader_derivatives.supports_khr = DXIL_SPV_TRUE;
+            }
             else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_MIN_PRECISION_IS_NATIVE_16BIT)
             {
                 if (!(quirks & VKD3D_SHADER_QUIRK_FORCE_MIN16_AS_32BIT))
@@ -915,6 +953,31 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
                 if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
                 {
                     ERR("dxil-spirv does not support SUBGROUP_PARTITIONED_NV.\n");
+                    ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+                    goto end;
+                }
+            }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_QUAD_CONTROL_RECONVERGENCE)
+            {
+                dxil_spv_option_quad_control_reconvergence helper = { { DXIL_SPV_OPTION_QUAD_CONTROL_RECONVERGENCE } };
+                helper.supports_maximal_reconvergence = DXIL_SPV_TRUE;
+                helper.supports_quad_control = DXIL_SPV_TRUE;
+
+                if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
+                {
+                    ERR("dxil-spirv does not support QUAD_CONTROL_RECONVERGENCE.\n");
+                    ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+                    goto end;
+                }
+            }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_RAW_ACCESS_CHAINS_NV)
+            {
+                static const dxil_spv_option_raw_access_chains_nv chain = {
+                        { DXIL_SPV_OPTION_RAW_ACCESS_CHAINS_NV }, DXIL_SPV_TRUE };
+
+                if (dxil_spv_converter_add_option(converter, &chain.base) != DXIL_SPV_SUCCESS)
+                {
+                    ERR("dxil-spirv does not support RAW_ACCESS_CHAINS_NV.\n");
                     ret = VKD3D_ERROR_NOT_IMPLEMENTED;
                     goto end;
                 }
@@ -952,6 +1015,20 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
             }
         }
 
+        if (compiler_args->driver_version)
+        {
+            const dxil_spv_option_driver_version version = {
+                    { DXIL_SPV_OPTION_DRIVER_VERSION },
+                    compiler_args->driver_id, compiler_args->driver_version };
+
+            if (dxil_spv_converter_add_option(converter, &version.base) != DXIL_SPV_SUCCESS)
+            {
+                ERR("dxil-spirv does not support DRIVER_VERSION.\n");
+                ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+                goto end;
+            }
+        }
+
         for (i = 0; i < compiler_args->parameter_count; i++)
         {
             const struct vkd3d_shader_parameter *argument = &compiler_args->parameters[i];
@@ -970,6 +1047,15 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
                 }
             }
         }
+    }
+
+    /* For legacy reasons, COMPUTE_SHADER_DERIVATIVES_NV is default true in dxil-spirv,
+     * so we have to override it to false as needed. */
+    if (dxil_spv_converter_add_option(converter, &compute_shader_derivatives.base) != DXIL_SPV_SUCCESS)
+    {
+        ERR("dxil-spirv does not support COMPUTE_SHADER_DERIVATIVES.\n");
+        ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+        goto end;
     }
 
     if (quirks & VKD3D_SHADER_QUIRK_INVARIANT_POSITION)
@@ -1072,7 +1158,13 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
             &spirv->meta.cs_workgroup_size[1],
             &spirv->meta.cs_workgroup_size[2]);
     dxil_spv_converter_get_patch_vertex_count(converter, &spirv->meta.patch_vertex_count);
-    dxil_spv_converter_get_compute_required_wave_size(converter, &spirv->meta.cs_required_wave_size);
+
+    dxil_spv_converter_get_compute_wave_size_range(converter,
+            &wave_size_min, &wave_size_max, &wave_size_preferred);
+
+    /* Ensure that the maximum wave size is always valid */
+    if (!wave_size_max)
+        wave_size_max = wave_size_min;
 
     if (compiler_args->promote_wave_size_heuristics)
     {
@@ -1080,11 +1172,15 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
         if (quirks & VKD3D_SHADER_QUIRK_FORCE_MAX_WAVE32)
             heuristic_wave_size = 32;
 
-        if (heuristic_wave_size && !spirv->meta.cs_required_wave_size &&
+        if (heuristic_wave_size && !wave_size_min &&
                 compiler_args->max_subgroup_size > heuristic_wave_size &&
                 compiler_args->min_subgroup_size <= heuristic_wave_size)
-            spirv->meta.cs_required_wave_size = heuristic_wave_size;
+            wave_size_preferred = heuristic_wave_size;
     }
+
+    spirv->meta.cs_wave_size_min = wave_size_min;
+    spirv->meta.cs_wave_size_max = wave_size_max;
+    spirv->meta.cs_wave_size_preferred = wave_size_preferred;
 
     vkd3d_shader_extract_feature_meta(spirv);
     vkd3d_shader_dump_spirv_shader(hash, spirv);
@@ -1128,6 +1224,14 @@ int vkd3d_shader_compile_dxil_export(const struct vkd3d_shader_code *dxil,
     quirks = vkd3d_shader_compile_arguments_select_quirks(compiler_args, hash);
     if (quirks & VKD3D_SHADER_QUIRK_FORCE_COMPUTE_BARRIER)
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_AFTER_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_PRE_COMPUTE_BARRIER)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_BEFORE_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_PRE_RASTERIZATION_BARRIER)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_PRE_RASTERIZATION_BEFORE_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_GRAPHICS_BARRIER)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_GRAPHICS_BEFORE_DISPATCH;
+    if (quirks & VKD3D_SHADER_QUIRK_DISABLE_OPTIMIZATIONS)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_DISABLE_OPTIMIZATIONS;
 
     /* For user provided (not mangled) export names, just inherit that name. */
     if (!demangled_export)
@@ -1339,14 +1443,34 @@ int vkd3d_shader_compile_dxil_export(const struct vkd3d_shader_code *dxil,
         helper.enabled = DXIL_SPV_TRUE;
         helper.version = DXIL_SPV_DESCRIPTOR_QA_INTERFACE_VERSION;
         helper.shader_hash = hash;
-        helper.global_desc_set = shader_interface_info->descriptor_qa_global_binding->set;
-        helper.global_binding = shader_interface_info->descriptor_qa_global_binding->binding;
-        helper.heap_desc_set = shader_interface_info->descriptor_qa_heap_binding->set;
-        helper.heap_binding = shader_interface_info->descriptor_qa_heap_binding->binding;
+        helper.global_desc_set = shader_interface_info->descriptor_qa_payload_binding->set;
+        helper.global_binding = shader_interface_info->descriptor_qa_payload_binding->binding;
+        helper.heap_desc_set = shader_interface_info->descriptor_qa_control_binding->set;
+        helper.heap_binding = shader_interface_info->descriptor_qa_control_binding->binding;
 
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             ERR("dxil-spirv does not support DESCRIPTOR_QA_BUFFER.\n");
+            ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+            goto end;
+        }
+    }
+    else if (shader_interface_info->flags & VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER)
+    {
+        struct dxil_spv_option_instruction_instrumentation helper;
+        helper.base.type = DXIL_SPV_OPTION_INSTRUCTION_INSTRUMENTATION;
+        helper.enabled = DXIL_SPV_TRUE;
+        helper.version = DXIL_SPV_INSTRUCTION_INSTRUMENTATION_INTERFACE_VERSION;
+        helper.shader_hash = hash;
+        helper.payload_desc_set = shader_interface_info->descriptor_qa_payload_binding->set;
+        helper.payload_binding = shader_interface_info->descriptor_qa_payload_binding->binding;
+        helper.control_desc_set = shader_interface_info->descriptor_qa_control_binding->set;
+        helper.control_binding = shader_interface_info->descriptor_qa_control_binding->binding;
+        helper.type = DXIL_SPV_INSTRUCTION_INSTRUMENTATION_TYPE_EXTERNALLY_VISIBLE_WRITE_NAN_INF;
+
+        if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
+        {
+            ERR("dxil-spirv does not support INSTRUCTION_INSTRUMENTATION.\n");
             ret = VKD3D_ERROR_NOT_IMPLEMENTED;
             goto end;
         }
@@ -1548,6 +1672,32 @@ int vkd3d_shader_compile_dxil_export(const struct vkd3d_shader_code *dxil,
                     ret = VKD3D_ERROR_NOT_IMPLEMENTED;
                     goto end;
                 }
+            }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_RAW_ACCESS_CHAINS_NV)
+            {
+                static const dxil_spv_option_raw_access_chains_nv chain = {
+                        { DXIL_SPV_OPTION_RAW_ACCESS_CHAINS_NV }, DXIL_SPV_TRUE };
+
+                if (dxil_spv_converter_add_option(converter, &chain.base) != DXIL_SPV_SUCCESS)
+                {
+                    ERR("dxil-spirv does not support RAW_ACCESS_CHAINS_NV.\n");
+                    ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+                    goto end;
+                }
+            }
+        }
+
+        if (compiler_args->driver_version)
+        {
+            const dxil_spv_option_driver_version version = {
+                    { DXIL_SPV_OPTION_DRIVER_VERSION },
+                    compiler_args->driver_id, compiler_args->driver_version };
+
+            if (dxil_spv_converter_add_option(converter, &version.base) != DXIL_SPV_SUCCESS)
+            {
+                ERR("dxil-spirv does not support DRIVER_VERSION.\n");
+                ret = VKD3D_ERROR_NOT_IMPLEMENTED;
+                goto end;
             }
         }
     }
