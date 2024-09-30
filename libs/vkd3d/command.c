@@ -11186,7 +11186,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
         UINT start_slot, UINT view_count, const D3D12_VERTEX_BUFFER_VIEW *views)
 {
     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
-    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
     struct vkd3d_dynamic_state *dyn_state = &list->dynamic_state;
     const struct vkd3d_unique_resource *resource = NULL;
     uint32_t vbo_invalidate_mask;
@@ -11218,20 +11217,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
         {
             if ((resource = vkd3d_va_map_deref(&list->device->memory_allocator.va_map, views[i].BufferLocation)))
             {
-
                 buffer = resource->vk_buffer;
                 offset = views[i].BufferLocation - resource->va;
                 stride = views[i].StrideInBytes;
                 size = views[i].SizeInBytes;
-
-                /*bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-                bufferViewCreateInfo.pNext = NULL;
-                bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE;
-                bufferViewCreateInfo.buffer = buffer;
-                bufferViewCreateInfo.offset = offset;
-                bufferViewCreateInfo.size = size;
-
-                VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));*/
             }
             else
             {
@@ -19466,7 +19455,7 @@ static HRESULT d3d12_command_signature_init_patch_commands_buffer(struct d3d12_c
     buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     if (FAILED(hr = vkd3d_create_buffer(device, &heap_info, D3D12_HEAP_FLAG_NONE,
-            &buffer_desc, "dgc-state-template", VK_VKD3D_TYPE_COMMANDS_JUICE, &signature->state_template.dgc.buffer)))
+            &buffer_desc, "dgc-state-template", &signature->state_template.dgc.buffer)))
         return hr;
 
     if (FAILED(hr = vkd3d_allocate_internal_buffer_memory(device, signature->state_template.dgc.buffer,

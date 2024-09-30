@@ -198,24 +198,6 @@ VK_DEVICE_PFN(vkWaitForFences)
 VK_DEVICE_PFN(vkWaitSemaphores)
 VK_DEVICE_PFN(vkCmdSetDepthWriteEnable)
 
-VK_DEVICE_PFN(vkCreateBufferViewJUICE)
-VK_DEVICE_PFN(vkBindBufferViewJUICE)
-VK_DEVICE_PFN(vkBindImageViewJUICE)
-
-///* VK_KHR_buffer_device_address */
-//VK_DEVICE_EXT_PFN(vkGetBufferDeviceAddressKHR)
-//VK_DEVICE_EXT_PFN(vkGetBufferOpaqueCaptureAddressKHR)
-//VK_DEVICE_EXT_PFN(vkGetDeviceMemoryOpaqueCaptureAddressKHR)
-//
-///* VK_KHR_timeline_semaphore */
-//VK_DEVICE_EXT_PFN(vkGetSemaphoreCounterValueKHR)
-//VK_DEVICE_EXT_PFN(vkWaitSemaphoresKHR)
-//VK_DEVICE_EXT_PFN(vkSignalSemaphoreKHR)
-//
-///* VK_KHR_draw_indirect_count */
-//VK_DEVICE_EXT_PFN(vkCmdDrawIndirectCountKHR)
-//VK_DEVICE_EXT_PFN(vkCmdDrawIndexedIndirectCountKHR)
-
 /* VK_KHR_push_descriptor */
 VK_DEVICE_EXT_PFN(vkCmdPushDescriptorSetKHR)
 
