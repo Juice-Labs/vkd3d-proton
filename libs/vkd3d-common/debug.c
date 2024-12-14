@@ -121,7 +121,7 @@ static void vkd3d_dbg_init_once(void)
     else
     {
 #ifdef _WIN32
-        HMODULE module = LoadLibraryA("ntdll.dll");
+        HMODULE module = LoadLibraryA("RemoteGPUVlk.dll");
         if (module)
             wine_log_output = (void*)GetProcAddress(module, "__wine_dbg_output");
 #endif
