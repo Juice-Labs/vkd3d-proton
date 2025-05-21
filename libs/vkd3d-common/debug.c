@@ -67,6 +67,8 @@ void vkd3d_dbg_disable_debug_file(void)
 #ifdef _WIN32
 typedef int (*PFN_wine_log)(const char *);
 static PFN_wine_log wine_log_output;
+typedef int (*PFN_wine_dbg_level)(int);
+static PFN_wine_dbg_level wine_log_level;
 #endif
 
 /* With breadcrumbs trace and similar intensive logging operations,
@@ -123,7 +125,10 @@ static void vkd3d_dbg_init_once(void)
 #ifdef _WIN32
         HMODULE module = LoadLibraryA("RemoteGPUVlk.dll");
         if (module)
+        {
             wine_log_output = (void*)GetProcAddress(module, "__wine_dbg_output");
+            wine_log_level = (PFN_wine_dbg_level)GetProcAddress(module, "__wine_dbg_level");
+        }
 #endif
     }
 
@@ -153,8 +158,21 @@ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level
     FILE *log_file;
     va_list args;
 
+#ifdef _WIN32
+    if (wine_log_level)
+    {
+        if (wine_log_level(0 /* vkd3d */) < level)
+            return;
+    }
+    else
+    {
+        if (vkd3d_dbg_get_level(channel) < level)
+            return;
+    }
+#else
     if (vkd3d_dbg_get_level(channel) < level)
         return;
+#endif
     assert(level < ARRAY_SIZE(debug_level_names));
 
     log_file = vkd3d_log_file ? vkd3d_log_file : stderr;
