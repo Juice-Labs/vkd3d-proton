@@ -3,7 +3,7 @@ d3d12_src = [
 ]
 
 if vkd3d_platform == 'windows'
-  d3d12_name_prefix = ''
+  d3d12_name_prefix = 'RemoteGPU'
   d3d12_dependencies = [ vkd3d_common_dep, lib_dxgi ]
 else
   d3d12_name_prefix = 'libvkd3d-proton-'
@@ -23,9 +23,19 @@ d3d12_lib = shared_library('d3d12', d3d12_src,
   name_prefix         : d3d12_name_prefix,
   dependencies        : d3d12_dependencies,
   include_directories : vkd3d_private_includes,
-  install             : true,
+  install             : false,
   objects             : d3d12_needs_defs ? 'd3d12.def' : [],
   vs_module_defs      : 'd3d12.def')
+
+if vkd3d_platform == 'windows'
+  # Install DLL and PDB to C:/juice/build/Release during meson install
+  meson.add_install_script(
+    'powershell', '-NoProfile', '-Command',
+    'New-Item -ItemType Directory -Force -Path C:\\juice\\build\\Release | Out-Null; '
+    + 'Copy-Item "' + meson.current_build_dir() + '\\RemoteGPUd3d12.dll" "C:\\juice\\build\\Release\\" -Force; '
+    + 'if (Test-Path "' + meson.current_build_dir() + '\\RemoteGPUd3d12.pdb") { Copy-Item "' + meson.current_build_dir() + '\\RemoteGPUd3d12.pdb" "C:\\juice\\build\\Release\\" -Force; }'
+  )
+endif
 
 d3d12_dep = declare_dependency(
   link_with           : d3d12_lib,
