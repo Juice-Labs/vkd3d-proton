@@ -132,7 +132,12 @@ static void vkd3d_dbg_init_once(void)
           juicevlk = LoadLibraryA(juiceLib);
 
         if (juicevlk)
-          wine_log_output = (void*)(GetProcAddress(juicevlk, "__wine_dbg_output"));            
+          wine_log_output = (void*)(GetProcAddress(juicevlk, "__wine_dbg_output"));
+
+        if (wine_log_output)
+        {
+            wine_log_output("VKD3D: VKD3D reporting for duty. If you can see this in the client logs, this means VKD3D is active and logging.\n");
+        }
 #endif
     }
 
