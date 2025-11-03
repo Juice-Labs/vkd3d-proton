@@ -5501,23 +5501,48 @@ static HRESULT d3d12_pipeline_create_private_root_signature(struct d3d12_device 
         VkPipelineBindPoint bind_point, const struct d3d12_pipeline_state_desc *desc,
         struct d3d12_root_signature **root_signature)
 {
-    const struct D3D12_SHADER_BYTECODE *bytecode;
+    const struct D3D12_SHADER_BYTECODE *bytecode[8];
     ID3D12RootSignature *object = NULL;
+    size_t bytecode_count = 0;
     HRESULT hr;
+    size_t i;
 
     if (bind_point == VK_PIPELINE_BIND_POINT_COMPUTE)
-        bytecode = &desc->cs;
-    else if (desc->ms.BytecodeLength)
-        bytecode = &desc->ms;
+    {
+        if (!desc->cs.BytecodeLength)
+            return E_INVALIDARG;
+        bytecode[bytecode_count++] = &desc->cs;
+    }
+    else if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS)
+    {
+        if (desc->vs.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->vs;
+        if (desc->hs.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->hs;
+        if (desc->ds.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->ds;
+        if (desc->gs.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->gs;
+        if (desc->ps.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->ps;
+        if (desc->as.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->as;
+        if (desc->ms.BytecodeLength)
+            bytecode[bytecode_count++] = &desc->ms;
+    }
     else
-        bytecode = &desc->vs;
-
-    if (!bytecode->BytecodeLength)
         return E_INVALIDARG;
 
-    if (FAILED(hr = ID3D12Device12_CreateRootSignature(&device->ID3D12Device_iface, 0,
-            bytecode->pShaderBytecode, bytecode->BytecodeLength,
-            &IID_ID3D12RootSignature, (void**)&object)))
+    if (bytecode_count == 0)
+        return E_INVALIDARG;
+
+    for (i = 0; i < bytecode_count; i++)
+        if (SUCCEEDED(hr = ID3D12Device12_CreateRootSignature(&device->ID3D12Device_iface, 0,
+                                                           bytecode[i]->pShaderBytecode, bytecode[i]->BytecodeLength,
+                                                           &IID_ID3D12RootSignature, (void**)&object)))
+            break;
+
+    if (!object)
         return hr;
 
     *root_signature = impl_from_ID3D12RootSignature(object);
