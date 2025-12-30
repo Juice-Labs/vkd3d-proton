@@ -22,6 +22,7 @@
 #include "vkd3d_win32.h"
 #endif
 #include "vkd3d_private.h"
+#include "vkd3d_timestamp_profiler.h"
 
 static inline struct dxgi_vk_swap_chain_factory *impl_from_IDXGIVkSwapChainFactory(IDXGIVkSwapChainFactory *iface)
 {
@@ -56,6 +57,12 @@ struct low_latency_state
     uint32_t minimum_interval_us;
 };
 
+struct anti_lag_state
+{
+    bool mode;
+    uint32_t max_fps;
+};
+
 struct dxgi_vk_swap_chain_present_request
 {
     uint64_t begin_frame_time_ns;
@@ -66,7 +73,11 @@ struct dxgi_vk_swap_chain_present_request
     DXGI_VK_HDR_METADATA dxgi_hdr_metadata;
     uint32_t swap_interval;
     uint64_t low_latency_frame_id;
-    struct low_latency_state requested_low_latency_state;
+    union
+    {
+        struct low_latency_state requested_low_latency_state;
+        struct anti_lag_state requested_anti_lag_state;
+    };
     bool low_latency_update_requested;
     bool modifies_hdr_metadata;
 };
@@ -786,6 +797,13 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
         chain->user.index = 0;
     }
 
+#ifndef _WIN32
+    /* Non-Win32 platforms (e.g. Wayland) may not be able to detect resizes on its own.
+     * We have drained the present queue at this point, so it's safe to poke this bool.
+     * If using native builds, it's up to the application to use ResizeBuffers properly. */
+    chain->present.force_swapchain_recreation = true;
+#endif
+
     return S_OK;
 }
 
@@ -886,6 +904,7 @@ static void dxgi_vk_swap_chain_set_hdr_metadata(struct dxgi_vk_swap_chain *chain
     VK_CALL(vkSetHdrMetadataEXT(chain->queue->device->vk_device, 1, &chain->present.vk_swapchain, &hdr_metadata));
 }
 
+#ifdef _WIN32
 static bool dxgi_vk_swap_chain_present_task_is_idle(struct dxgi_vk_swap_chain *chain)
 {
     uint64_t presented_count = vkd3d_atomic_uint64_load_explicit(&chain->present.present_count, vkd3d_memory_order_acquire);
@@ -902,9 +921,11 @@ static bool dxgi_vk_swap_chain_is_occluded(struct dxgi_vk_swap_chain *chain)
     /* Win32 jank, when these are 0 we cannot create a swapchain. */
     return surface_caps.maxImageExtent.width == 0 || surface_caps.maxImageExtent.height == 0;
 }
+#endif
 
 static bool dxgi_vk_swap_chain_present_is_occluded(struct dxgi_vk_swap_chain *chain)
 {
+#ifdef _WIN32
     if (dxgi_vk_swap_chain_present_task_is_idle(chain))
     {
         /* Query the surface directly. */
@@ -918,6 +939,11 @@ static bool dxgi_vk_swap_chain_present_is_occluded(struct dxgi_vk_swap_chain *ch
          * so rely on observed behavior from presentation thread. */
         return vkd3d_atomic_uint32_load_explicit(&chain->present.is_occlusion_state, vkd3d_memory_order_relaxed) != 0;
     }
+#else
+	/* Irrelevant on native build. */
+	(void)chain;
+	return false;
+#endif
 }
 
 static void dxgi_vk_swap_chain_present_callback(void *chain);
@@ -1031,7 +1057,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
     request->dxgi_hdr_metadata = chain->user.dxgi_hdr_metadata;
     request->modifies_hdr_metadata = chain->user.modifies_hdr_metadata;
     request->begin_frame_time_ns = chain->user.begin_frame_time_ns;
-    request->low_latency_frame_id = chain->queue->device->frame_markers.present;
+    request->low_latency_frame_id = vkd3d_atomic_uint64_load_explicit(
+            &chain->queue->device->frame_markers.present, vkd3d_memory_order_acquire);
 
     if (chain->debug_latency && request->low_latency_frame_id)
         INFO("Presenting with low latency frame ID: %"PRIu64".\n", request->low_latency_frame_id);
@@ -1046,6 +1073,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
         chain->low_latency_update_requested = false;
         low_latency_enable = chain->requested_low_latency_state.mode;
         pthread_mutex_unlock(&chain->present.low_latency_state_update_lock);
+    }
+    else if (chain->queue->device->device_info.anti_lag_amd.antiLag)
+    {
+        spinlock_acquire(&chain->queue->device->low_latency_swapchain_spinlock);
+        request->requested_anti_lag_state.mode = chain->queue->device->swapchain_info.mode;
+        request->requested_anti_lag_state.max_fps = chain->queue->device->swapchain_info.max_fps;
+        low_latency_enable = request->requested_anti_lag_state.mode;
+        spinlock_release(&chain->queue->device->low_latency_swapchain_spinlock);
     }
     else
     {
@@ -1714,6 +1749,49 @@ static void dxgi_vk_swap_chain_low_latency_state_update(struct dxgi_vk_swap_chai
     }
 }
 
+static void dxgi_vk_swap_chain_anti_lag_state_update(struct dxgi_vk_swap_chain *chain)
+{
+    struct d3d12_device *device = chain->queue->device;
+
+    if (chain->request.low_latency_frame_id)
+    {
+        const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+        VkAntiLagPresentationInfoAMD present_info;
+        VkAntiLagDataAMD anti_lag;
+        bool should_signal;
+
+        memset(&anti_lag, 0, sizeof(anti_lag));
+        memset(&present_info, 0, sizeof(present_info));
+        anti_lag.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD;
+        anti_lag.mode = chain->request.requested_anti_lag_state.mode ?
+                VK_ANTI_LAG_MODE_ON_AMD : VK_ANTI_LAG_MODE_OFF_AMD;
+        anti_lag.maxFPS = chain->request.requested_anti_lag_state.max_fps;
+        anti_lag.pPresentationInfo = &present_info;
+
+        present_info.sType = VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD;
+        present_info.frameIndex = chain->request.low_latency_frame_id;
+        present_info.stage = VK_ANTI_LAG_STAGE_PRESENT_AMD;
+
+        /* Don't submit the same frame marker over and over. This will probably matter for frame-gen. */
+        spinlock_acquire(&chain->queue->device->low_latency_swapchain_spinlock);
+        should_signal = present_info.frameIndex > device->frame_markers.consumed_present_id;
+        if (should_signal)
+            device->frame_markers.consumed_present_id = present_info.frameIndex;
+        spinlock_release(&chain->queue->device->low_latency_swapchain_spinlock);
+
+        /* There is no strong requirement that frame index is submitted monotonically,
+         * so it should be fine to drop the lock while calling UpdateAMD.
+         * We don't want to hold a lock while calling AntiLagUpdateAMD.
+         * This is only a theoretical problem if there are two physical queues that concurrently call
+         * QueuePresentKHR. */
+        if (should_signal)
+        {
+            TRACE("AntiLag present timeline, frame %"PRIu64".\n", present_info.frameIndex);
+            VK_CALL(vkAntiLagUpdateAMD(device->vk_device, &anti_lag));
+        }
+    }
+}
+
 static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1764,7 +1842,11 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
 
     /* Sanity check, this cannot happen on Win32 surfaces, but could happen on Wayland. */
     if (surface_caps.currentExtent.width == UINT32_MAX || surface_caps.currentExtent.height == UINT32_MAX)
-        return;
+    {
+        /* TODO: Can add extended interface to query surface size. */
+        surface_caps.currentExtent.width = chain->desc.Width;
+        surface_caps.currentExtent.height = chain->desc.Height;
+    }
 
     /* No format to present to yet. Can happen in transition states for HDR.
      * Where we have modified color space, but not yet changed user backbuffer format. */
@@ -2369,6 +2451,11 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (!dxgi_vk_swap_chain_submit_blit(chain, swapchain_index))
         return;
 
+    /* Only mark anti-lag update after we have submitted blit
+     * so we don't get wrong associations. */
+    if (chain->queue->device->device_info.anti_lag_amd.antiLag)
+        dxgi_vk_swap_chain_anti_lag_state_update(chain);
+
     memset(&present_info, 0, sizeof(present_info));
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_info.pSwapchains = &chain->present.vk_swapchain;
@@ -2558,6 +2645,10 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
     vkd3d_breadcrumb_tracer_update_barrier_hashes(&chain->queue->device->breadcrumb_tracer);
+#endif
+
+#ifdef VKD3D_ENABLE_PROFILING
+    vkd3d_timestamp_profiler_mark_frame_boundary(chain->queue->device->timestamp_profiler);
 #endif
 }
 
@@ -2773,13 +2864,13 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
                  * That's a good sign the application is actually not behaving correctly. */
                 if (previous_semaphore >= (int)chain->frame_latency + 4)
                 {
-                    WARN("Incrementing frame latency semaphore beyond max latency. "
+                    TRACE("Incrementing frame latency semaphore beyond max latency. "
                             "Did application forget to acquire? (new count = %d, max latency = %u)\n",
                             previous_semaphore + 1, chain->frame_latency);
                 }
             }
             else
-                WARN("Failed to increment swapchain semaphore. Did application forget to acquire?\n");
+                TRACE("Failed to increment swapchain semaphore. Did application forget to acquire?\n");
         }
 
         if (vkd3d_native_sync_handle_is_valid(chain->frame_latency_event_internal))
@@ -2957,8 +3048,7 @@ static HRESULT dxgi_vk_swap_chain_init_frame_rate_limiter(struct dxgi_vk_swap_ch
 
     pthread_mutex_init(&chain->frame_rate_limit.lock, NULL);
 
-    if (vkd3d_get_env_var("VKD3D_FRAME_RATE", env, sizeof(env)) ||
-            vkd3d_get_env_var("DXVK_FRAME_RATE", env, sizeof(env)))
+    if (vkd3d_get_env_var("VKD3D_FRAME_RATE", env, sizeof(env)))
     {
         target_frame_rate = strtod(env, NULL);
 

@@ -589,6 +589,11 @@ static inline bool is_vkd3d_proton_device(ID3D12Device *device)
 {
     return false;
 }
+
+static inline bool get_driver_vk_features(ID3D12Device *device, void *pnext)
+{
+    return false;
+}
 #else
 
 static ID3D12Device *create_device(void)
@@ -597,6 +602,35 @@ static ID3D12Device *create_device(void)
     HRESULT hr;
     hr = D3D12CreateDevice(NULL, vkd3d_device_feature_level, &IID_ID3D12Device, (void **)&device);
     return SUCCEEDED(hr) ? device : NULL;
+}
+
+static inline bool get_driver_vk_features(ID3D12Device *device, void *pnext)
+{
+    PFN_vkGetPhysicalDeviceFeatures2 pfn_vkGetPhysicalDeviceFeatures2;
+    VkPhysicalDeviceFeatures2 device_features2;
+    VkPhysicalDevice vk_physical_device;
+    VkInstance vk_instance;
+    ID3D12DeviceExt *ext;
+    VkDevice vk_device;
+
+    if (!init_vulkan_loader())
+        return false;
+
+    if (FAILED(ID3D12Device_QueryInterface(device, &IID_ID3D12DeviceExt, (void **)&ext)))
+        return false;
+
+    ID3D12DeviceExt_GetVulkanHandles(ext, &vk_instance, &vk_physical_device, &vk_device);
+    ID3D12DeviceExt_Release(ext);
+
+    pfn_vkGetPhysicalDeviceFeatures2
+            = (void *)pfn_vkGetInstanceProcAddr(vk_instance, "vkGetPhysicalDeviceFeatures2");
+    ok(pfn_vkGetPhysicalDeviceFeatures2, "vkGetPhysicalDeviceFeatures2 is NULL.\n");
+
+    memset(&device_features2, 0, sizeof(device_features2));
+    device_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    device_features2.pNext = pnext;
+    pfn_vkGetPhysicalDeviceFeatures2(vk_physical_device, &device_features2);
+    return true;
 }
 
 static bool get_driver_properties(ID3D12Device *device, VkPhysicalDeviceDriverPropertiesKHR *driver_properties)
@@ -772,6 +806,12 @@ static inline void parse_args(int argc, char **argv)
             use_warp_device = true;
         else if (!strcmp(argv[i], "--adapter") && i + 1 < argc)
             use_adapter_idx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--list-tests")) {
+#define decl_test(x) printf("%s\n", #x)
+#include "d3d12_tests.h"
+#undef decl_test
+          exit(0);
+        }
     }
 }
 
@@ -860,7 +900,16 @@ static inline void vkd3d_set_out_of_spec_test_behavior(VKD3D_DEBUG_CONTROL_OUT_O
     if (!pfn_D3D12GetInterface)
         return;
     if (SUCCEEDED(pfn_D3D12GetInterface(&CLSID_VKD3DDebugControl, &IID_IVKD3DDebugControlInterface, (void**)&dbg)))
-        ok(SUCCEEDED(IVKD3DDebugControlInterface_SetOutOfSpecTestBehavior(dbg, behavior, enable)), "Failed to unmute validation.\n");
+        ok(SUCCEEDED(IVKD3DDebugControlInterface_SetOutOfSpecTestBehavior(dbg, behavior, enable)), "Failed to set out of spec behavior.\n");
+}
+
+static inline void vkd3d_set_behavior_flags(VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS flags)
+{
+    IVKD3DDebugControlInterface *dbg = NULL;
+    if (!pfn_D3D12GetInterface)
+        return;
+    if (SUCCEEDED(pfn_D3D12GetInterface(&CLSID_VKD3DDebugControl, &IID_IVKD3DDebugControlInterface, (void**)&dbg)))
+        ok(SUCCEEDED(IVKD3DDebugControlInterface_SetBehaviorFlags(dbg, flags)), "Failed to set behavior flags.\n");
 }
 
 #endif  /* __VKD3D_D3D12_CROSSTEST_H */

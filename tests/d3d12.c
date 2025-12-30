@@ -24,6 +24,8 @@
 #define INITGUID
 #define VKD3D_TEST_DECLARE_MAIN
 #include "d3d12_crosstest.h"
+#include "vkd3d_device_vkd3d_ext.h"
+#include "vkd3d_command_list_vkd3d_ext.h"
 
 #define decl_test(x) void x(void);
 #include "d3d12_tests.h"
@@ -31,7 +33,7 @@
 
 /* Uncomment when testing against Agility SDK debug layers. */
 #if 0
-__declspec(dllexport) extern const UINT D3D12SDKVersion = 613;
+__declspec(dllexport) extern const UINT D3D12SDKVersion = 618;
 __declspec(dllexport) extern const char *D3D12SDKPath = u8".\\D3D12\\";
 #endif
 
@@ -45,9 +47,8 @@ START_TEST(d3d12)
     parse_args(argc, argv);
     enable_d3d12_debug_layer(argc, argv);
     enable_feature_level_override(argc, argv);
-    init_adapter_info();
-
     vkd3d_set_running_in_test_suite();
+    init_adapter_info();
 
     pfn_D3D12CreateVersionedRootSignatureDeserializer = get_d3d12_pfn(D3D12CreateVersionedRootSignatureDeserializer);
     pfn_D3D12SerializeVersionedRootSignature = get_d3d12_pfn(D3D12SerializeVersionedRootSignature);

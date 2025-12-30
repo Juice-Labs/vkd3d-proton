@@ -71,7 +71,7 @@ static VkResult vkd3d_meta_create_sampler(struct d3d12_device *device, VkFilter 
 
     view_key.view_type = VKD3D_VIEW_TYPE_SAMPLER;
     view_key.u.sampler = desc;
-    view = vkd3d_view_map_create_view(&device->sampler_map, device, &view_key);
+    view = vkd3d_view_map_create_view(&device->sampler_map.map, device, &view_key);
     if (!view)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -532,7 +532,7 @@ VkExtent3D vkd3d_meta_get_clear_image_uav_workgroup_size(VkImageViewType view_ty
         }
         case VK_IMAGE_VIEW_TYPE_3D:
         {
-            VkExtent3D result = { 4, 4, 4 };
+            VkExtent3D result = { 8, 8, 8 };
             return result;
         }
         default:
@@ -1751,9 +1751,9 @@ HRESULT vkd3d_meta_get_execute_indirect_pipeline(struct vkd3d_meta_ops *meta_ops
         uint32_t patch_command_count, struct vkd3d_execute_indirect_info *info)
 {
     struct vkd3d_meta_execute_indirect_spec_constant_data execute_indirect_spec_constants;
-    VkSpecializationMapEntry map_entry[VKD3D_SHADER_DEBUG_RING_SPEC_INFO_MAP_ENTRIES + 1];
+    VkSpecializationMapEntry map_entry[VKD3D_SHADER_SPEC_INFO_MAP_ENTRIES + 1];
     struct vkd3d_execute_indirect_ops *meta_indirect_ops = &meta_ops->execute_indirect;
-    struct vkd3d_shader_debug_ring_spec_info debug_ring_info;
+    struct vkd3d_shader_spec_info debug_ring_info;
 
     VkSpecializationInfo spec;
     HRESULT hr = S_OK;
@@ -1788,14 +1788,14 @@ HRESULT vkd3d_meta_get_execute_indirect_pipeline(struct vkd3d_meta_ops *meta_ops
                 0 /* Reserve this hash for internal debug streams. */);
 
         memset(&execute_indirect_spec_constants, 0, sizeof(execute_indirect_spec_constants));
-        execute_indirect_spec_constants.constants = debug_ring_info.constants;
+        execute_indirect_spec_constants.constants = debug_ring_info.debug_ring_constants;
         execute_indirect_spec_constants.workgroup_size_x = patch_command_count;
 
         memcpy(map_entry, debug_ring_info.map_entries, sizeof(debug_ring_info.map_entries));
-        map_entry[VKD3D_SHADER_DEBUG_RING_SPEC_INFO_MAP_ENTRIES].constantID = 4;
-        map_entry[VKD3D_SHADER_DEBUG_RING_SPEC_INFO_MAP_ENTRIES].offset =
+        map_entry[VKD3D_SHADER_SPEC_INFO_MAP_ENTRIES].constantID = 4;
+        map_entry[VKD3D_SHADER_SPEC_INFO_MAP_ENTRIES].offset =
                 offsetof(struct vkd3d_meta_execute_indirect_spec_constant_data, workgroup_size_x);
-        map_entry[VKD3D_SHADER_DEBUG_RING_SPEC_INFO_MAP_ENTRIES].size = sizeof(patch_command_count);
+        map_entry[VKD3D_SHADER_SPEC_INFO_MAP_ENTRIES].size = sizeof(patch_command_count);
 
         spec.pMapEntries = map_entry;
         spec.pData = &execute_indirect_spec_constants;
@@ -2107,9 +2107,7 @@ static HRESULT vkd3d_workgraph_ops_init(struct vkd3d_workgraph_indirect_ops *wor
     unsigned int i;
     VkResult vr;
 
-    if (!device->device_info.vulkan_1_2_features.vulkanMemoryModel ||
-            !device->device_info.vulkan_1_3_features.subgroupSizeControl ||
-            !(device->device_info.vulkan_1_3_properties.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT))
+    if (!d3d12_device_supports_workgraphs(device))
         return S_OK;
 
     push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2153,7 +2151,7 @@ static HRESULT vkd3d_workgraph_ops_init(struct vkd3d_workgraph_indirect_ops *wor
     spec_data[0] = device->device_info.vulkan_1_3_properties.maxSubgroupSize;
     spec_data[1] = device->device_info.vulkan_1_3_properties.maxSubgroupSize;
     spec_data[2] = 0;
-    spec_data[3] = device->device_info.properties2.properties.limits.maxComputeWorkGroupCount[0] >=
+    spec_data[3] = device->device_info.properties2.properties.limits.maxComputeWorkGroupCount[0] <
             VKD3D_WORKGRAPH_MAX_WGX_NO_PRIMARY_EXECUTION_THRESHOLD;
 
     memset(&required, 0, sizeof(required));

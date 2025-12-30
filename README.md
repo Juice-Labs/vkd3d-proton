@@ -147,6 +147,7 @@ commas or semicolons.
       For debugging purposes.
     - `nodxr` - Disables DXR support.
     - `dxr` - DXR is normally enabled automatically. This config forces it to be enabled even when considered unsafe.
+    - `dxr12` - Enables experimental support for DXR 1.2 if `VK_EXT_opacity_micromap` is available.
     - `force_static_cbv` - Unsafe speed hack on NVIDIA. May or may not give a significant performance uplift.
     - `single_queue` - Do not use asynchronous compute or transfer queues.
     - `no_upload_hvv` - Blocks any attempt to use host-visible VRAM (large/resizable BAR) for the UPLOAD heap.
@@ -186,8 +187,6 @@ commas or semicolons.
 
 ### Frame rate limit
 The `VKD3D_FRAME_RATE` environment variable can be used to limit the frame rate. A value of `0` uncaps the frame rate, while any positive value will limit rendering to the given number of frames per second.
-
-The `DXVK_FRAME_RATE` environment variable is also detected on VKD3D-Proton, so you may prefer to use that instead of having to remember two separate variables that do the same thing. `VKD3D_FRAME_RATE`, however, only applies to VKD3D (Direct3D 12) scenarios. If both variables are used, `VKD3D_FRAME_RATE` takes precedence.
 
 ## Shader cache
 

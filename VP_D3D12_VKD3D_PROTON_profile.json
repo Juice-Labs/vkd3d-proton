@@ -10,7 +10,8 @@
                 "VK_EXT_depth_clip_enable": 1,
                 "VK_EXT_robustness2": 1,
                 "VK_EXT_transform_feedback": 1,
-                "VK_EXT_vertex_attribute_divisor": 3
+                "VK_EXT_vertex_attribute_divisor": 3,
+                "VK_EXT_dynamic_rendering_unused_attachments": 1
             },
             "features": {
                 "VkPhysicalDeviceCustomBorderColorFeaturesEXT": {
@@ -99,6 +100,9 @@
                     "shaderCullDistance": true,
                     "shaderInt16": true,
                     "shaderStorageImageWriteWithoutFormat": true
+                },
+                "VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT": {
+                    "dynamicRenderingUnusedAttachments": true
                 }
             },
             "properties": {
@@ -535,7 +539,9 @@
                 "VK_KHR_maintenance6": 1,
                 "VK_KHR_maintenance7": 1,
                 "VK_EXT_depth_bias_control": 1,
-                "VK_EXT_zero_initialize_device_memory" : 1
+                "VK_EXT_zero_initialize_device_memory" : 1,
+                "VK_KHR_unified_image_layouts" : 1,
+                "VK_EXT_line_rasterization" : 1
             },
             "features": {
                 "VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR": {
@@ -578,8 +584,16 @@
                 },
                 "VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT": {
                     "zeroInitializeDeviceMemory": true
+                },
+                "VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR": {
+                    "unifiedImageLayouts" : true
+                },
+                "VkPhysicalDeviceLineRasterizationFeaturesEXT": {
+                    "rectangularLines": true,
+                    "bresenhamLines" : true,
+                    "smoothLines" : true
                 }
-          }
+            }
         },
         "optional_amd": {
             "extensions": {
@@ -587,16 +601,12 @@
                 "VK_AMD_device_coherent_memory": 1,
                 "VK_AMD_shader_core_properties": 1,
                 "VK_AMD_shader_core_properties2": 1,
-                "VK_EXT_dynamic_rendering_unused_attachments": 1,
                 "VK_EXT_image_compression_control": 1,
                 "VK_MESA_image_alignment_control": 1
             },
             "features": {
                 "VkPhysicalDeviceCoherentMemoryFeaturesAMD": {
                     "deviceCoherentMemory": true
-                },
-                "VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT": {
-                    "dynamicRenderingUnusedAttachments": true
                 },
                 "VkPhysicalDeviceImageCompressionControlFeaturesEXT": {
                     "imageCompressionControl": true

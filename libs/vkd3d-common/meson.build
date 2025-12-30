@@ -6,7 +6,6 @@ vkd3d_common_src = [
   'string.c',
   'file_utils.c',
   'platform.c',
-  'guid.c',
 ]
 
 vkd3d_common_dependencies = []

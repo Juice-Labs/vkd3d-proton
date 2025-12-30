@@ -2541,6 +2541,7 @@ void test_line_rasterization(void)
     struct test_context_desc desc;
     struct resource_readback rb;
     struct test_context context;
+    bool supports_smooth_lines;
     ID3D12PipelineState *pso;
     D3D12_VIEWPORT viewport;
     ID3D12Device2 *device2;
@@ -2720,16 +2721,16 @@ void test_line_rasterization(void)
     }
     tests[] =
     {
-        /* AMD and Nvidia behave differently w.r.t. line rasterization */
+        /* AMD and Nvidia behave differently w.r.t. line rasterization. Intel smooth lines are *very* thick. */
         { &pso_rs_plain_stream, 0x03c0u, 0x03c0u, false, false, false },
-        { &pso_rs_plain_stream, 0x13c8u, 0x17e8u, true,  true,  false },
+        { &pso_rs_plain_stream, 0x13c8u, 0x3ffcu, true,  true,  false },
         { &pso_rs_plain_stream, 0x03c0u, 0x17e8u, false, false, true  },
         { &pso_rs_plain_stream, 0x03c0u, 0x17e8u, false, true,  true  },
         /* Explicit line rasterization states last, we skip all tests if these are unsupported. */
         { &pso_rs_desc2_stream, 0x03c0u, 0x03c0u, false, false, false, D3D12_LINE_RASTERIZATION_MODE_ALIASED },
         { &pso_rs_desc2_stream, 0x03c0u, 0x03c0u, false, false, false, D3D12_LINE_RASTERIZATION_MODE_QUADRILATERAL_NARROW },
         { &pso_rs_desc2_stream, 0x03c0u, 0x17e8u, false, false, false, D3D12_LINE_RASTERIZATION_MODE_QUADRILATERAL_WIDE },
-        { &pso_rs_desc2_stream, 0x13c8u, 0x17e8u, true,  false, false, D3D12_LINE_RASTERIZATION_MODE_ALPHA_ANTIALIASED },
+        { &pso_rs_desc2_stream, 0x13c8u, 0x3ffcu, true,  false, false, D3D12_LINE_RASTERIZATION_MODE_ALPHA_ANTIALIASED },
     };
 
     memset(&desc, 0, sizeof(desc));
@@ -2750,7 +2751,13 @@ void test_line_rasterization(void)
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
     memset(&options19, 0, sizeof(options19));
-    ID3D12Device_CheckFeatureSupport(context.device, D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
+    hr = ID3D12Device_CheckFeatureSupport(context.device, D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
+    if (FAILED(hr))
+    {
+        skip("OPTIONS19 not supported.\n");
+        destroy_test_context(&context);
+        return;
+    }
 
     rt = create_default_texture2d(context.device, 4, 4, 1, 1, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     rtv_heap = create_cpu_descriptor_heap(context.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1);
@@ -2775,6 +2782,18 @@ void test_line_rasterization(void)
 
     pso_rs_plain_desc.root_signature.root_signature = context.root_signature;
     pso_rs_desc2_desc.root_signature.root_signature = context.root_signature;
+
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_line_rasterization"))
+    {
+        VkPhysicalDeviceLineRasterizationFeaturesEXT line;
+        memset(&line, 0, sizeof(line));
+        line.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT;
+        supports_smooth_lines = get_driver_vk_features(context.device, &line) && line.smoothLines == VK_TRUE;
+    }
+    else
+    {
+        supports_smooth_lines = !is_vkd3d_proton_device(context.device);
+    }
 
     for (i = 0; i < ARRAY_SIZE(tests); i++)
     {
@@ -2831,10 +2850,12 @@ void test_line_rasterization(void)
             }
         }
 
+        /* ANV and Turnip don't support smoothLines. */
+        bug_if(tests[i].expected_alpha && !supports_smooth_lines)
         ok(!(tests[i].min_coverage & ~coverage) && !(coverage & ~tests[i].max_coverage),
                 "Got coverage %#x, expected range is %#x - %#x.\n", coverage, tests[i].min_coverage, tests[i].max_coverage);
 
-        bug_if(tests[i].expected_alpha && is_amd_windows_device(context.device))
+        bug_if(tests[i].expected_alpha && (is_amd_windows_device(context.device) || !supports_smooth_lines))
         ok(has_alpha == tests[i].expected_alpha, "Got alpha %u, expected %u.\n", has_alpha, tests[i].expected_alpha);
 
         release_resource_readback(&rb);
@@ -3668,7 +3689,13 @@ void test_view_instancing(void)
     pso_vs_ps_desc.view_instancing = view_instancing_viewports_subobject;
 
     hr = create_pipeline_state_from_stream(device2, &pso_vs_ps_desc, &pso);
-    ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
+    /* Normal multiview cannot support this. */
+    todo ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
+    if (FAILED(hr))
+    {
+        ok(hr == E_NOTIMPL, "Expected NOTIMPL.\n");
+        pso = NULL;
+    }
 
     for (i = 0; i < ARRAY_SIZE(viewports); i++)
     {
@@ -3699,7 +3726,9 @@ void test_view_instancing(void)
     ID3D12GraphicsCommandList_RSSetScissorRects(context.list, ARRAY_SIZE(scissors), scissors);
     ID3D12GraphicsCommandList_IASetPrimitiveTopology(context.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D12GraphicsCommandList_IASetIndexBuffer(context.list, &ibv);
-    ID3D12GraphicsCommandList_DrawIndexedInstanced(context.list, 3, 1, 0, 0, 0);
+
+    if (SUCCEEDED(hr))
+        ID3D12GraphicsCommandList_DrawIndexedInstanced(context.list, 3, 1, 0, 0, 0);
 
     transition_resource_state(context.list, context.render_target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
@@ -3713,7 +3742,7 @@ void test_view_instancing(void)
             got = get_readback_uint(&rb, x, y, 0);
             expected = (x / 2) + 2 * (y / 2);
 
-            ok(got == expected, "Got %#x, expected %#x at (%u,%u).\n", got, expected, x, y);
+            todo_if(!pso) ok(got == expected, "Got %#x, expected %#x at (%u,%u).\n", got, expected, x, y);
         }
     }
 
@@ -3725,7 +3754,8 @@ void test_view_instancing(void)
         reset_command_list(context.list, context.allocator);
     }
 
-    ID3D12PipelineState_Release(pso);
+    if (pso)
+        ID3D12PipelineState_Release(pso);
 
     /* Test a mixture of layer and viewport indices */
     pso_vs_ps_desc.view_instancing = view_instancing_mixed_subobject;
@@ -3782,9 +3812,16 @@ void test_view_instancing(void)
         pso_vs_ps_desc.vs = vs_multiview_export_layer_viewport_subobject;
 
         hr = create_pipeline_state_from_stream(device2, &pso_vs_ps_desc, &pso);
-        ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
 
-        for (shader_args.layer = 0; shader_args.layer <= 1; shader_args.layer++)
+        /* We don't support layer bias at the moment. */
+        todo ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
+        if (FAILED(hr))
+        {
+            ok(hr == E_NOTIMPL, "Expected E_NOTIMPL.\n");
+            pso = NULL;
+        }
+
+        for (shader_args.layer = 0; pso && shader_args.layer <= 1; shader_args.layer++)
         {
             for (shader_args.viewport = 0; shader_args.viewport <= 2; shader_args.viewport++)
             {
@@ -3835,7 +3872,8 @@ void test_view_instancing(void)
             }
         }
 
-        ID3D12PipelineState_Release(pso);
+        if (pso)
+            ID3D12PipelineState_Release(pso);
     }
     else
     {
@@ -3859,9 +3897,14 @@ void test_view_instancing(void)
     pso_vs_gs_ps_desc.view_instancing = view_instancing_export_subobject;
 
     hr = create_pipeline_state_from_stream(device2, &pso_vs_gs_ps_desc, &pso);
-    ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
+    todo ok(hr == S_OK, "Failed to create graphics pipeline, hr %#x.\n", hr);
+    if (FAILED(hr))
+    {
+        ok(hr == E_NOTIMPL, "Expected E_NOTIMPL.\n");
+        pso = NULL;
+    }
 
-    for (shader_args.layer = 0; shader_args.layer <= 1; shader_args.layer++)
+    for (shader_args.layer = 0; pso && shader_args.layer <= 1; shader_args.layer++)
     {
         for (shader_args.viewport = 0; shader_args.viewport <= 2; shader_args.viewport++)
         {
@@ -3907,7 +3950,8 @@ void test_view_instancing(void)
         }
     }
 
-    ID3D12PipelineState_Release(pso);
+    if (pso)
+        ID3D12PipelineState_Release(pso);
 
     if (options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1)
     {
@@ -3945,8 +3989,8 @@ void test_view_instancing(void)
         {
             vkd3d_test_set_context("layer %u", i);
 
-            /* AMD only renders first layer, NV renders nothing */
-            bug_if(is_amd_windows_device(context.device))
+            /* AMD only renders first layer, NV renders nothing. Also NV renders nothing in Vulkan :D */
+            bug_if(is_amd_windows_device(context.device) || is_nvidia_device(context.device))
             check_sub_resource_uint(context.render_target, i, context.queue, context.list, i, 0);
 
             reset_command_list(context.list, context.allocator);

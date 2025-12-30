@@ -71,6 +71,20 @@ interface ID3D12DXVKInteropDevice1 : ID3D12DXVKInteropDevice
 }
 
 [
+    uuid(90ecf26e-b212-43f5-b62a-825ad7b1385e),
+    object,
+    local,
+    pointer_default(unique)
+]
+interface ID3D12DXVKInteropDevice2 : ID3D12DXVKInteropDevice1
+{
+    /* Unlike LockCommandQueue this doesn't drain or lock d3d12 queue but only locks the access to the underlying
+     * Vulkan queue so it can be used outside of d3d12. */
+    HRESULT LockVulkanQueue(ID3D12CommandQueue *queue);
+    HRESULT UnlockVulkanQueue(ID3D12CommandQueue *queue);
+}
+
+[
     uuid(f3112584-41f9-348d-a59b-00b7e1d285d6),
     object,
     local,
@@ -95,4 +109,45 @@ interface ID3D12DeviceExt1 : ID3D12DeviceExt
 {
     HRESULT CreateResourceFromBorrowedHandle(const D3D12_RESOURCE_DESC1 *desc, UINT64 vk_handle, ID3D12Resource **resource);
     HRESULT GetVulkanQueueInfoEx(ID3D12CommandQueue *queue, VkQueue *vk_queue, UINT32 *vk_queue_index, UINT32 *vk_queue_flags, UINT32 *vk_queue_family);
+}
+
+/* 1:1 implementation of ffx_antilag2_dx12.h */
+struct AmdAntiLagAPIData_v1
+{
+    UINT uiSize;
+    UINT uiVersion;
+    UINT eMode;
+    const char *sControlStr;
+    UINT uiControlStrLength;
+    UINT maxFPS;
+};
+
+
+struct AmdAntiLagAPIData_v2
+{
+    UINT uiSize;
+    UINT uiVersion;
+    struct
+    {
+        UINT unused0               : 1;
+        UINT unused1               : 1;
+        UINT signalFgFrameType     : 1;
+        UINT isInterpolatedFrame   : 1;
+        UINT signalGetUserInputIdx : 1;
+        UINT signalEndOfFrameIdx   : 1;
+        UINT reserved              :26;
+    } flags;
+    UINT64 iiFrameIdx;
+    UINT64 uiiReserved[19];
+};
+
+[
+    uuid(44085fbe-e839-40c5-bf38-0ebc5ab4d0a6),
+    object,
+    local,
+    pointer_default(unique)
+]
+interface IAmdExtAntiLagApi : IUnknown
+{
+    HRESULT UpdateAntiLagState(void *pData);
 }

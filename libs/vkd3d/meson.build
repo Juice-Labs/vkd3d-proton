@@ -71,6 +71,7 @@ vkd3d_src = [
   'command.c',
   'command_list_vkd3d_ext.c',
   'command_queue_vkd3d_ext.c',
+  'd3dkmt.c',
   'device.c',
   'device_vkd3d_ext.c',
   'heap.c',
@@ -86,9 +87,11 @@ vkd3d_src = [
   'raytracing_pipeline.c',
   'state_object_common.c',
   'acceleration_structure.c',
+  'opacity_micromap.c',
   'swapchain.c',
   'queue_timeline.c',
-  'address_binding_tracker.c'
+  'address_binding_tracker.c',
+  'workgraphs.c'
 ]
 
 if enable_renderdoc
@@ -109,6 +112,10 @@ endif
 
 if vkd3d_platform == 'windows'
   vkd3d_src += ['shared_metadata.c']
+endif
+
+if enable_profiling
+  vkd3d_src += ['timestamp_profiler.c']
 endif
 
 vkd3d_lib = static_library('vkd3d-proton', vkd3d_src, glsl_generator.process(vkd3d_shaders), vkd3d_build, vkd3d_version,

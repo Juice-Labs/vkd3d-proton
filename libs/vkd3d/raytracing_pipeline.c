@@ -471,7 +471,7 @@ struct d3d12_rt_state_object_pipeline_data
     size_t vk_libraries_size;
     size_t vk_libraries_count;
 
-    struct vkd3d_shader_debug_ring_spec_info *spec_info_buffer;
+    struct vkd3d_shader_spec_info *spec_info_buffer;
     bool has_deep_duplication;
 };
 
@@ -2002,6 +2002,7 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
             shader_interface_info.binding_count = per_entry_global_signature->binding_count;
             shader_interface_info.push_constant_buffers = per_entry_global_signature->root_constants;
             shader_interface_info.push_constant_buffer_count = per_entry_global_signature->root_constant_count;
+            /* TODO: EXTENDED_DEBUG_UTILS mapping. */
             shader_interface_info.push_constant_ubo_binding = &per_entry_global_signature->push_constant_ubo_binding;
             shader_interface_info.offset_buffer_binding = &per_entry_global_signature->offset_buffer_binding;
 #ifdef VKD3D_ENABLE_DESCRIPTOR_QA
@@ -2489,6 +2490,8 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
         pipeline_create_info.flags |= VK_PIPELINE_CREATE_RAY_TRACING_SKIP_TRIANGLES_BIT_KHR;
     if (object->pipeline_config.Flags & D3D12_RAYTRACING_PIPELINE_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
         pipeline_create_info.flags |= VK_PIPELINE_CREATE_RAY_TRACING_SKIP_AABBS_BIT_KHR;
+    if (object->pipeline_config.Flags & D3D12_RAYTRACING_PIPELINE_FLAG_ALLOW_OPACITY_MICROMAPS)
+        pipeline_create_info.flags |= VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT;
 
     library_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
     library_info.pNext = NULL;

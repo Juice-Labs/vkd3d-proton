@@ -402,6 +402,8 @@ static inline unsigned int format_size(DXGI_FORMAT format)
             return 16;
         case DXGI_FORMAT_R16G16B16A16_TYPELESS:
         case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UINT:
+        case DXGI_FORMAT_R16G16B16A16_SINT:
         case DXGI_FORMAT_R32G32_UINT:
         case DXGI_FORMAT_R32G32_SINT:
         case DXGI_FORMAT_R32G32_FLOAT:
@@ -1622,6 +1624,8 @@ void destroy_depth_stencil_(unsigned int line, struct depth_stencil_resource *ds
 #define create_cb_root_signature(a, b, c, e) create_cb_root_signature_(__LINE__, a, b, c, e)
 #define create_32bit_constants_root_signature(a, b, c, e) \
 create_32bit_constants_root_signature_(__LINE__, a, b, c, e, 0)
+#define create_32bit_constants_root_signature_flags(a, b, c, e, f) \
+create_32bit_constants_root_signature_(__LINE__, a, b, c, e, f)
 #define create_texture_root_signature(a, b, c, d) create_texture_root_signature_(__LINE__, a, b, c, d, NULL)
 #define create_compute_pipeline_state(a, b, c) create_compute_pipeline_state_(__LINE__, a, b, c)
 #define create_command_signature(a, b) create_command_signature_(__LINE__, a, b)
@@ -1839,5 +1843,15 @@ union d3d12_view_instancing_subobject
     };
     void *dummy_align;
 };
+
+float half_to_float(uint16_t u16_value);
+uint16_t float_to_half(float v);
+
+void insert_debug_label(ID3D12GraphicsCommandList *list, const char *str);
+void begin_debug_region(ID3D12GraphicsCommandList *list, const char *str);
+void end_debug_region(ID3D12GraphicsCommandList *list);
+
+void insert_debug_label_printf(ID3D12GraphicsCommandList *list, const char *fmt, ...);
+void begin_debug_region_printf(ID3D12GraphicsCommandList *list, const char *fmt, ...);
 
 #endif  /* __VKD3D_D3D12_TEST_UTILS_H */

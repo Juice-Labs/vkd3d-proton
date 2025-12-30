@@ -536,9 +536,6 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef _WIN32
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-#else
-        /* TODO: We need to attempt to dlopen() native DXVK DXGI and handle this more gracefully. */
-        "VK_KHR_xcb_surface",
 #endif
     };
 
@@ -546,7 +543,14 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
     {
         VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME,
         VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+#ifndef _WIN32
+        /* TODO: We need to attempt to dlopen() native DXVK DXGI and handle this more gracefully. */
+        "VK_KHR_xcb_surface",
+        "VK_KHR_xlib_surface",
+        "VK_KHR_wayland_surface",
+#endif
     };
+
 #ifdef _WIN32
     char *openvr_extensions, *openxr_extensions;
     uint32_t vr_extension_count;
@@ -783,6 +787,7 @@ static uint32_t vkd3d_debug_control_is_running_under_test;
 static uint32_t vkd3d_debug_control_explode_on_error;
 static uint32_t vkd3d_debug_control_out_of_spec_behavior[VKD3D_DEBUG_CONTROL_OUT_OF_SPEC_BEHAVIOR_COUNT];
 static uint32_t vkd3d_debug_control_mute_validation_global_counter;
+static uint32_t vkd3d_debug_control_behavior_flags;
 
 static struct vkd3d_debug_control_muted_vuid
 {
@@ -806,6 +811,11 @@ bool vkd3d_debug_control_has_out_of_spec_test_behavior(VKD3D_DEBUG_CONTROL_OUT_O
     if (behavior >= VKD3D_DEBUG_CONTROL_OUT_OF_SPEC_BEHAVIOR_COUNT)
         return false;
     return vkd3d_atomic_uint32_load_explicit(&vkd3d_debug_control_out_of_spec_behavior[behavior], vkd3d_memory_order_relaxed) != 0;
+}
+
+VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS vkd3d_debug_control_get_behavior_flags(void)
+{
+    return vkd3d_atomic_uint32_load_explicit(&vkd3d_debug_control_behavior_flags, vkd3d_memory_order_relaxed);
 }
 
 bool vkd3d_debug_control_mute_message_id(const char *vuid)
@@ -953,6 +963,14 @@ static HRESULT STDMETHODCALLTYPE vkd3d_debug_control_SetOutOfSpecTestBehavior(
     }
 }
 
+static HRESULT STDMETHODCALLTYPE vkd3d_debug_control_SetBehaviorFlags(
+        IVKD3DDebugControlInterface *iface, VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS behavior)
+{
+    (void)iface;
+    vkd3d_atomic_uint32_store_explicit(&vkd3d_debug_control_behavior_flags, behavior, vkd3d_memory_order_relaxed);
+    return S_OK;
+}
+
 static CONST_VTBL struct IVKD3DDebugControlInterfaceVtbl vkd3d_debug_control_vtbl =
 {
     vkd3d_debug_control_SetRunningUnderTest,
@@ -962,6 +980,7 @@ static CONST_VTBL struct IVKD3DDebugControlInterfaceVtbl vkd3d_debug_control_vtb
     vkd3d_debug_control_MuteValidationMessageID,
     vkd3d_debug_control_UnmuteValidationMessageID,
     vkd3d_debug_control_SetOutOfSpecTestBehavior,
+    vkd3d_debug_control_SetBehaviorFlags,
 };
 
 static const struct IVKD3DDebugControlInterface vkd3d_debug_control_instance =
@@ -1006,4 +1025,4 @@ HRESULT WINAPI DLLEXPORT D3D12GetInterface(REFCLSID rcslid, REFIID iid, void **d
 
 /* Just expose the latest stable AgilitySDK version.
  * This is actually exported as a UINT and not a function it seems. */
-DLLEXPORT const UINT D3D12SDKVersion = 614;
+DLLEXPORT const UINT D3D12SDKVersion = 618;

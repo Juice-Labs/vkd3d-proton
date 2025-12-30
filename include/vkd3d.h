@@ -84,7 +84,7 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_PIPELINE_LIBRARY_APP_CACHE_ONLY (1ull << 26)
 #define VKD3D_CONFIG_FLAG_SHADER_CACHE_SYNC (1ull << 27)
 #define VKD3D_CONFIG_FLAG_FORCE_RAW_VA_CBV (1ull << 28)
-/* Bit 29 vacant */
+#define VKD3D_CONFIG_FLAG_DXR_1_2 (1ull << 29)
 #define VKD3D_CONFIG_FLAG_ALLOW_SBT_COLLECTION (1ull << 30)
 #define VKD3D_CONFIG_FLAG_PLACED_TEXTURE_ALIASING (1ull << 31)
 #define VKD3D_CONFIG_FLAG_USE_HOST_IMPORT_FALLBACK (1ull << 32)
@@ -106,7 +106,7 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_DRIVER_VERSION_SENSITIVE_SHADERS (1ull << 48)
 #define VKD3D_CONFIG_FLAG_SMALL_VRAM_REBAR (1ull << 49)
 #define VKD3D_CONFIG_FLAG_NO_STAGGERED_SUBMIT (1ull << 50)
-#define VKD3D_CONFIG_FLAG_CLEAR_UAV_SYNC (1ull << 51)
+#define VKD3D_CONFIG_FLAG_NO_CLEAR_UAV_SYNC (1ull << 51)
 #define VKD3D_CONFIG_FLAG_FORCE_DYNAMIC_MSAA (1ull << 52)
 #define VKD3D_CONFIG_FLAG_INSTRUCTION_QA_CHECKS (1ull << 53)
 #define VKD3D_CONFIG_FLAG_TRANSFER_QUEUE (1ull << 54)
@@ -115,6 +115,9 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_SKIP_NULL_SPARSE_TILES (1ull << 57)
 #define VKD3D_CONFIG_FLAG_QUEUE_PROFILE_EXTRA (1ull << 58)
 #define VKD3D_CONFIG_FLAG_DAMAGE_NOT_ZEROED_ALLOCATIONS (1ull << 59)
+#define VKD3D_CONFIG_FLAG_DEFER_RESOURCE_DESTRUCTION (1ull << 60)
+#define VKD3D_CONFIG_FLAG_PREFER_THIN_UAV_TILING (1ull << 61)
+#define VKD3D_CONFIG_FLAG_EXTENDED_DEBUG_UTILS (1ull << 62)
 
 struct vkd3d_instance;
 
@@ -175,10 +178,10 @@ uint32_t vkd3d_get_vk_queue_index(ID3D12CommandQueue *queue);
 uint32_t vkd3d_get_vk_queue_flags(ID3D12CommandQueue *queue);
 VkQueue vkd3d_acquire_vk_queue(ID3D12CommandQueue *queue);
 void vkd3d_release_vk_queue(ID3D12CommandQueue *queue);
+VkQueue vkd3d_lock_vk_queue(ID3D12CommandQueue *queue);
+void vkd3d_unlock_vk_queue(ID3D12CommandQueue *queue);
 void vkd3d_enqueue_initial_transition(ID3D12CommandQueue *queue, ID3D12Resource *resource);
 
-HRESULT vkd3d_create_image_resource(ID3D12Device *device,
-        const struct vkd3d_image_resource_create_info *create_info, ID3D12Resource **resource);
 ULONG vkd3d_resource_decref(ID3D12Resource *resource);
 ULONG vkd3d_resource_incref(ID3D12Resource *resource);
 
