@@ -1438,6 +1438,9 @@ void d3d12_desc_copy(vkd3d_cpu_descriptor_va_t dst, vkd3d_cpu_descriptor_va_t sr
         unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device);
 void d3d12_desc_copy_single(vkd3d_cpu_descriptor_va_t dst,
         vkd3d_cpu_descriptor_va_t src, struct d3d12_device *device);
+bool d3d12_desc_copy_accumulate(vkd3d_cpu_descriptor_va_t dst, vkd3d_cpu_descriptor_va_t src,
+        unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device,
+        VkCopyDescriptorSet *vk_copies, uint32_t max_copies, uint32_t *copy_count_inout);
 
 void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t descriptor,
         struct d3d12_device *device, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc);
