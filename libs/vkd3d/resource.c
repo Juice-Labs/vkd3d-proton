@@ -5134,6 +5134,132 @@ void d3d12_desc_copy_range(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descripto
         VK_CALL(vkUpdateDescriptorSets(device->vk_device, 0, NULL, copy_count, vk_copies));
 }
 
+/* Accumulating version of d3d12_desc_copy_range that doesn't call vkUpdateDescriptorSets immediately.
+ * Accumulates VkCopyDescriptorSet operations into the provided buffer.
+ * copy_count_inout: in/out parameter - current count in buffer, updated with new count.
+ * Returns true if buffer has space, false if buffer is full. */
+static bool d3d12_desc_copy_range_accumulate(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
+        unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device,
+        VkCopyDescriptorSet *vk_copies, uint32_t max_copies, uint32_t *copy_count_inout)
+{
+    const struct vkd3d_bindless_set_info *set_info;
+    struct vkd3d_descriptor_binding binding;
+    struct d3d12_desc_split src, dst;
+    VkCopyDescriptorSet *vk_copy;
+    uint32_t set_info_mask = 0;
+    uint32_t copy_count = *copy_count_inout;
+    uint32_t set_info_index;
+    unsigned int i;
+
+    src = d3d12_desc_decode_va(src_va);
+    dst = d3d12_desc_decode_va(dst_va);
+
+    for (i = 0; i < count; i++)
+        set_info_mask |= src.types[i].set_info_mask;
+
+    memcpy(dst.view, src.view, sizeof(*dst.view) * count);
+    memcpy(dst.types, src.types, sizeof(*dst.types) * count);
+
+    while (set_info_mask)
+    {
+        set_info_index = vkd3d_bitmask_iter32(&set_info_mask);
+        set_info = &device->bindless_state.set_info[set_info_index];
+
+        if (set_info->host_copy_template)
+        {
+            set_info->host_copy_template(
+                    dst.heap->sets[set_info->set_index].mapped_set,
+                    src.heap->sets[set_info->set_index].mapped_set,
+                    dst.offset, src.offset, count);
+        }
+        else
+        {
+            if (copy_count >= max_copies)
+            {
+                /* Buffer full, caller needs to flush */
+                *copy_count_inout = copy_count;
+                return false;
+            }
+
+            binding = vkd3d_bindless_state_binding_from_info_index(&device->bindless_state, set_info_index);
+
+            vk_copy = &vk_copies[copy_count++];
+            vk_copy->sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
+            vk_copy->pNext = NULL;
+            vk_copy->srcSet = src.heap->sets[binding.set].vk_descriptor_set;
+            vk_copy->srcBinding = binding.binding;
+            vk_copy->srcArrayElement = src.offset;
+            vk_copy->dstSet = dst.heap->sets[binding.set].vk_descriptor_set;
+            vk_copy->dstBinding = binding.binding;
+            vk_copy->dstArrayElement = dst.offset;
+            vk_copy->descriptorCount = count;
+        }
+    }
+
+    if (heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+    {
+        const VkDeviceAddress *src_vas = src.heap->raw_va_aux_buffer.host_ptr;
+        VkDeviceAddress *dst_vas = dst.heap->raw_va_aux_buffer.host_ptr;
+        memcpy(dst_vas + dst.offset, src_vas + src.offset, sizeof(*dst_vas) * count);
+
+        if (device->bindless_state.flags & (VKD3D_TYPED_OFFSET_BUFFER | VKD3D_SSBO_OFFSET_BUFFER))
+        {
+            const struct vkd3d_bound_buffer_range *src_ranges = src.heap->buffer_ranges.host_ptr;
+            struct vkd3d_bound_buffer_range *dst_ranges = dst.heap->buffer_ranges.host_ptr;
+            memcpy(dst_ranges + dst.offset, src_ranges + src.offset, sizeof(*dst_ranges) * count);
+        }
+    }
+
+    *copy_count_inout = copy_count;
+    return true;
+}
+
+/* Accumulating version of d3d12_desc_copy that doesn't call vkUpdateDescriptorSets immediately.
+ * Only accumulates for non-embedded descriptor paths. */
+bool d3d12_desc_copy_accumulate(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
+        unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device,
+        VkCopyDescriptorSet *vk_copies, uint32_t max_copies, uint32_t *copy_count_inout)
+{
+#ifdef VKD3D_ENABLE_DESCRIPTOR_QA
+    if (!d3d12_device_use_embedded_mutable_descriptors(device))
+    {
+        struct d3d12_desc_split dst, src;
+        unsigned int i;
+        dst = d3d12_desc_decode_va(dst_va);
+        src = d3d12_desc_decode_va(src_va);
+
+        for (i = 0; i < count; i++)
+        {
+            vkd3d_descriptor_debug_copy_descriptor(
+                    dst.heap->descriptor_heap_info.host_ptr, dst.heap->cookie, dst.offset + i,
+                    src.heap->descriptor_heap_info.host_ptr, src.heap->cookie, src.offset + i,
+                    src.view[i].qa_cookie);
+        }
+    }
+#endif
+
+    if (d3d12_device_use_embedded_mutable_descriptors(device))
+    {
+        /* Embedded descriptors use memcpy, no vkUpdateDescriptorSets needed */
+        if (heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        {
+            d3d12_desc_copy_embedded_resource(dst_va, src_va,
+                    device->bindless_state.descriptor_buffer_cbv_srv_uav_size * count);
+        }
+        else
+        {
+            vkd3d_memcpy_aligned_cached((void *)dst_va, (const void *)src_va,
+                    device->bindless_state.descriptor_buffer_sampler_size * count);
+        }
+        return true;
+    }
+    else
+    {
+        return d3d12_desc_copy_range_accumulate(dst_va, src_va, count, heap_type, device,
+                vk_copies, max_copies, copy_count_inout);
+    }
+}
+
 void d3d12_desc_copy(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
         unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device)
 {

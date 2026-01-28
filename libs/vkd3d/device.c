@@ -6518,10 +6518,15 @@ static inline void d3d12_device_copy_descriptors(struct d3d12_device *device,
         const UINT *src_descriptor_range_sizes,
         D3D12_DESCRIPTOR_HEAP_TYPE descriptor_heap_type)
 {
+    /* Use a larger buffer to accumulate operations - allow for many iterations */
+    VkCopyDescriptorSet vk_copies[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS * 16];
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     unsigned int dst_range_idx, dst_idx, src_range_idx, src_idx;
     D3D12_CPU_DESCRIPTOR_HANDLE dst, src, dst_start, src_start;
     unsigned int dst_range_size, src_range_size, copy_count;
     unsigned int increment;
+    uint32_t accumulated_copy_count = 0;
+    const uint32_t max_copies = sizeof(vk_copies) / sizeof(vk_copies[0]);
 
     increment = d3d12_device_get_descriptor_handle_increment_size(device, descriptor_heap_type);
 
@@ -6544,9 +6549,24 @@ static inline void d3d12_device_copy_descriptors(struct d3d12_device *device,
         {
             case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
             case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV:
-                d3d12_desc_copy(dst.ptr, src.ptr, copy_count,
-                        descriptor_heap_type, device);
+            {
+                bool has_space = d3d12_desc_copy_accumulate(dst.ptr, src.ptr, copy_count,
+                        descriptor_heap_type, device, vk_copies, max_copies, &accumulated_copy_count);
+                
+                if (!has_space)
+                {
+                    /* Buffer full, flush and continue */
+                    if (accumulated_copy_count > 0)
+                    {
+                        VK_CALL(vkUpdateDescriptorSets(device->vk_device, 0, NULL, accumulated_copy_count, vk_copies));
+                        accumulated_copy_count = 0;
+                    }
+                    /* Retry the copy - it should fit now */
+                    d3d12_desc_copy_accumulate(dst.ptr, src.ptr, copy_count,
+                            descriptor_heap_type, device, vk_copies, max_copies, &accumulated_copy_count);
+                }
                 break;
+            }
             case D3D12_DESCRIPTOR_HEAP_TYPE_RTV:
             case D3D12_DESCRIPTOR_HEAP_TYPE_DSV:
                 d3d12_rtv_desc_copy(d3d12_rtv_desc_from_cpu_handle(dst),
@@ -6570,6 +6590,12 @@ static inline void d3d12_device_copy_descriptors(struct d3d12_device *device,
             ++src_range_idx;
             src_idx = 0;
         }
+    }
+
+    /* Flush any remaining accumulated operations */
+    if (accumulated_copy_count > 0)
+    {
+        VK_CALL(vkUpdateDescriptorSets(device->vk_device, 0, NULL, accumulated_copy_count, vk_copies));
     }
 }
 
