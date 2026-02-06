@@ -4257,7 +4257,7 @@ static void d3d12_command_list_load_attachment(struct d3d12_command_list *list, 
         if (rp_layouts[i] != final_layouts[i])
         {
             VkImageMemoryBarrier2 *barrier = &image_barriers[dep_info.imageMemoryBarrierCount++];
-            assert(clear_op);
+            assert(load_op == VK_ATTACHMENT_LOAD_OP_CLEAR);
             assert(view->format->vk_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
 
             memset(barrier, 0, sizeof(*barrier));
@@ -5309,6 +5309,9 @@ static void d3d12_command_list_fuse_attachment_clear(struct d3d12_command_list *
                     d3d12_command_list_notify_dsv_writes(list, clear->resource, clear->view, plane_write_mask);
                     list->dsv_plane_optimal_mask |= plane_write_mask;
                     list->dsv_layout = dsv_plane_optimal_mask_to_layout(list->dsv_plane_optimal_mask, resource->format->vk_aspect_mask);
+
+                    attachment->imageLayout = list->dsv_layout;
+                    stencil_attachment->imageLayout = list->dsv_layout;
 
                     /* We need to ensure that we transition to the same layout that the render pass transition
                      * will use as a source layout when transitioning to dsv_layout.
@@ -9601,6 +9604,16 @@ static bool d3d12_command_list_init_copy_texture_region(struct d3d12_command_lis
         out->dst_format = dst_resource->format;
         out->src_format = src_resource->format;
 
+        /* Don't trigger false positive for depth-stencil <-> color copies. */
+        if (dst_resource->format->byte_count * dst_resource->format->block_byte_count !=
+            src_resource->format->byte_count * src_resource->format->block_byte_count &&
+            dst_resource->format->vk_aspect_mask == src_resource->format->vk_aspect_mask)
+        {
+            FIXME_ONCE("Invalid formats for resource copy. src format #%x, dst format #%x\n",
+                    src_resource->format->dxgi_format, dst_resource->format->dxgi_format);
+            return false;
+        }
+
         out->overlapping_subresource = dst_resource == src_resource && src->SubresourceIndex == dst->SubresourceIndex;
 
         if (!vk_image_copy_from_d3d12(&out->copy.image, src->SubresourceIndex, dst->SubresourceIndex,
@@ -10050,6 +10063,16 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
 
         if (dst_resource->format->vk_aspect_mask & VK_IMAGE_ASPECT_PLANE_0_BIT)
             plane_count = dst_resource->format->plane_count;
+
+        /* Don't trigger false positive for depth-stencil <-> color copies. */
+        if (dst_resource->format->byte_count * dst_resource->format->block_byte_count !=
+            src_resource->format->byte_count * src_resource->format->block_byte_count &&
+            dst_resource->format->vk_aspect_mask == src_resource->format->vk_aspect_mask)
+        {
+            FIXME_ONCE("Invalid formats for resource copy. src format #%x, dst format #%x\n",
+                    src_resource->format->dxgi_format, dst_resource->format->dxgi_format);
+            return;
+        }
 
         assert(d3d12_resource_is_texture(dst_resource));
         assert(d3d12_resource_is_texture(src_resource));
