@@ -562,8 +562,9 @@ static const struct vkd3d_instance_application_meta application_override[] = {
      * Invariant workarounds actually cause more issues than they resolve on NV.
      * RADV already has workarounds by default.
      * FIXME: The proper workaround will be a workaround which force-emits mul + add + precise. The vertex shaders
-     * are broken enough that normal invariance is not enough. */
-    { VKD3D_STRING_COMPARE_EXACT, "SOTTR.exe", VKD3D_CONFIG_FLAG_FORCE_NO_INVARIANT_POSITION, 0 },
+     * are broken enough that normal invariance is not enough.
+     * DCC stores causes glitches when SMAA4x is enabled with RADV. */
+    { VKD3D_STRING_COMPARE_EXACT, "SOTTR.exe", VKD3D_CONFIG_FLAG_FORCE_NO_INVARIANT_POSITION | VKD3D_CONFIG_FLAG_DISABLE_UAV_COMPRESSION, 0 },
     /* Elden Ring (1245620).
      * Game is really churny on committed memory allocations, and does not use NOT_ZEROED. Clearing works causes bubbles.
      * It seems to work just fine however to skip the clears. */
@@ -659,6 +660,8 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     { VKD3D_STRING_COMPARE_EXACT, "DeathStranding.exe", VKD3D_CONFIG_FLAG_NO_UPLOAD_HVV, 0 },
     /* AC: Valhalla (2208920). Very ugly use-after-free in some cases. The main culprit seems a sparse resource. */
     { VKD3D_STRING_COMPARE_EXACT, "ACValhalla.exe", VKD3D_CONFIG_FLAG_DEFER_RESOURCE_DESTRUCTION, 0 },
+    /* Guardians of the Galaxy: Tries to use root descriptors with indirect rendering if it detects an Nvidia GPU. */
+    { VKD3D_STRING_COMPARE_EXACT, "gotg.exe", VKD3D_CONFIG_FLAG_FORCE_RAW_VA_CBV, 0 },
     { VKD3D_STRING_COMPARE_NEVER, NULL, 0, 0 }
 };
 
@@ -857,7 +860,7 @@ static const struct vkd3d_shader_quirk_info death_stranding_quirks = {
 
 static const struct vkd3d_shader_quirk_hash wuthering_waves_hashes[] = {
     /* LightGridInjectionCS. Forgets to UAV barrier after ClearCS. */
-    { 0x513ffbb9ffc55d06, VKD3D_SHADER_QUIRK_FORCE_PRE_COMPUTE_BARRIER },
+    { 0xc9d920e5cce36266, VKD3D_SHADER_QUIRK_FORCE_PRE_COMPUTE_BARRIER },
 };
 
 static const struct vkd3d_shader_quirk_info wuthering_waves_quirks = {
@@ -888,6 +891,15 @@ static const struct vkd3d_shader_quirk_hash control_hashes[] = {
 
 static const struct vkd3d_shader_quirk_info control_quirks = {
     control_hashes, ARRAY_SIZE(control_hashes), 0,
+};
+
+static const struct vkd3d_shader_quirk_hash rottr_hashes[] = {
+    /* Game forgets to transition depth to pixel shader resource. */
+    { 0x7d1af7d0c7d63856, VKD3D_SHADER_QUIRK_FORCE_GRAPHICS_BARRIER_BEFORE_RENDER_PASS },
+};
+
+static const struct vkd3d_shader_quirk_info rottr_quirks = {
+    rottr_hashes, ARRAY_SIZE(rottr_hashes), 0,
 };
 
 static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
@@ -958,6 +970,8 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     { VKD3D_STRING_COMPARE_EXACT, "Borderlands4.exe", &bl4_quirks },
     /* Control (870780). */
     { VKD3D_STRING_COMPARE_EXACT, "Control_DX12.exe", &control_quirks },
+	/* Rise of the Tomb Raider */
+    { VKD3D_STRING_COMPARE_EXACT, "ROTTR.exe", &rottr_quirks },
     /* Unreal Engine 4 */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Shipping.exe", &ue4_quirks },
     /* MSVC fails to compile empty array. */

@@ -1519,7 +1519,13 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     chain->present.current_backbuffer_index = UINT32_MAX;
 
     if (chain->queue->device->vk_info.NV_low_latency2)
+    {
+        spinlock_acquire(&chain->queue->device->low_latency_swapchain_spinlock);
+        chain->queue->device->swapchain_info.vk_swapchain_count--;
+        spinlock_release(&chain->queue->device->low_latency_swapchain_spinlock);
+
         pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+    }
 }
 
 static VkColorSpaceKHR convert_color_space(DXGI_COLOR_SPACE_TYPE dxgi_color_space)
@@ -1952,6 +1958,18 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     /* If low latency is supported restore the current low latency state now */
     if (chain->queue->device->vk_info.NV_low_latency2)
     {
+        struct d3d12_device *device = chain->queue->device;
+
+        spinlock_acquire(&device->low_latency_swapchain_spinlock);
+        device->swapchain_info.vk_swapchain_count++;
+
+        if (device->swapchain_info.vk_swapchain_count > 1 && device->swapchain_info.low_latency_swapchain)
+        {
+            dxgi_vk_swap_chain_decref(device->swapchain_info.low_latency_swapchain);
+            device->swapchain_info.low_latency_swapchain = NULL;
+        }
+        spinlock_release(&device->low_latency_swapchain_spinlock);
+
         dxgi_vk_swap_chain_set_low_latency_state(chain, &chain->present.low_latency_state);
         pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
     }
@@ -2163,7 +2181,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         write_info.dstArrayElement = 0;
         write_info.descriptorCount = 1;
         image_info.imageView = chain->user.vk_image_views[chain->request.user_index];
-        image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_info.imageLayout = d3d12_resource_pick_layout(chain->user.backbuffers[chain->request.user_index], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         image_info.sampler = VK_NULL_HANDLE;
 
         VK_CALL(vkCmdPushDescriptorSetKHR(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
