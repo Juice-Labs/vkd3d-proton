@@ -1705,6 +1705,14 @@ static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_d
     if (info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
         info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
 
+    /* Duplicate 4 byte minStorageBufferOffsetAlignment for Juice drivers to enable
+     * descriptor buffers which is gated on minStorageBufferOffsetAlignment <= 16.
+     * This is assuming that there's an NVIDIA device on the server for which the
+     * storage buffer alignment can be 4 as per the comment above.
+     */
+    if (info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_JUICE_PROPRIETARY)
+        info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
+
     /* UE5 is broken and assumes that if mesh shaders are supported, barycentrics are also supported.
      * This happens to be the case on RDNA2+ and Turing+ on Windows, but Mesa landed barycentrics long
      * after mesh shaders, so Mesa 23.1 will often fail on boot for practically all UE5 content.
