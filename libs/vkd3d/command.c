@@ -14425,12 +14425,25 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetIndexBuffer(d3d12_command_
     list->index_buffer.vk_type = index_type;
     if (view->BufferLocation != 0)
     {
+        const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+        VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
+
         resource = vkd3d_va_map_deref(&list->device->memory_allocator.va_map, view->BufferLocation);
         if (resource)
         {
             list->index_buffer.buffer = resource->vk_buffer;
             list->index_buffer.offset = view->BufferLocation - resource->va;
             list->index_buffer.size = view->SizeInBytes;
+
+            bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+            bufferViewCreateInfo.pNext = NULL;
+            bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_INDEX_BUFFER_JUICE;
+            bufferViewCreateInfo.buffer = list->index_buffer.buffer;
+            bufferViewCreateInfo.offset = list->index_buffer.offset;
+            bufferViewCreateInfo.size = view->SizeInBytes;
+
+            if (resource->allocation)
+                VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
         }
         else
         {
@@ -14454,6 +14467,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
     struct vkd3d_dynamic_state *dyn_state = &list->dynamic_state;
+    VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
     const struct vkd3d_unique_resource *resource = NULL;
     uint32_t vbo_invalidate_mask;
     bool invalidate = false;
@@ -14488,6 +14502,16 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
                 offset = views[i].BufferLocation - resource->va;
                 stride = views[i].StrideInBytes;
                 size = views[i].SizeInBytes;
+
+                bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+                bufferViewCreateInfo.pNext = NULL;
+                bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE;
+                bufferViewCreateInfo.buffer = buffer;
+                bufferViewCreateInfo.offset = offset;
+                bufferViewCreateInfo.size = size;
+
+                if (resource->allocation)
+                    VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));
             }
             else
             {
