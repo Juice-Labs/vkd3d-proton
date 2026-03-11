@@ -571,6 +571,8 @@ static void dxgi_vk_swap_chain_cleanup_common(struct dxgi_vk_swap_chain *chain)
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     unsigned int i;
 
+    dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
+
     VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.vk_internal_blit_semaphore, NULL));
     VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.vk_complete_semaphore, NULL));
     VK_CALL(vkDestroyCommandPool(chain->queue->device->vk_device, chain->present.vk_blit_command_pool, NULL));
