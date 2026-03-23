@@ -6800,7 +6800,7 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
                 VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &descriptor_info);
     }
 
-    if (descriptor_info.image.imageView)
+    if (descriptor_info.image.imageView && resource->mem.device_allocation.vk_memory)
     {
         VkD3D12BindImageViewInfoJUICE bindViewInfo;
         bindViewInfo.sType = VK_STRUCTURE_TYPE_D3D12_BIND_IMAGE_VIEW_INFO_JUICE;
