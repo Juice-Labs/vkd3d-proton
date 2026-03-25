@@ -2048,13 +2048,9 @@ bool vkd3d_allocate_image_memory_prefers_dedicated(struct d3d12_device *device,
     if (device->d3d12_caps.options.ResourceHeapTier < D3D12_RESOURCE_HEAP_TIER_2)
         return true;
 
-    /* If we don't need to sub-allocate, and we don't need to clear any buffers
-     * there is no need to allocate a GLOBAL_BUFFER.
-     * However, since we have TIER_2 we always have a global buffer available if need be. */
-    return requirements->size >= VKD3D_VA_BLOCK_SIZE &&
-            (vkd3d_driver_can_zero_clear_alloc(device, true) ||
-                    ((heap_flags & D3D12_HEAP_FLAG_CREATE_NOT_ZEROED) &&
-                    !VKD3D_CONFIG_FLAG_IS_SET(DAMAGE_NOT_ZEROED_ALLOCATIONS)));
+    /* Otherwise, defer to VkMemoryDedicatedRequirements::prefersDedicatedAllocation
+     * as returned by vkGetImageMemoryRequirements2 at the call site. */
+    return false;
 }
 
 static bool vkd3d_memory_info_allow_suballocate(struct d3d12_device *device,
