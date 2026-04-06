@@ -203,6 +203,9 @@ VK_DEVICE_PFN(vkCreateBufferViewJUICE)
 VK_DEVICE_PFN(vkBindBufferViewJUICE)
 VK_DEVICE_PFN(vkBindImageViewJUICE)
 
+VK_DEVICE_PFN(vkBeginCommandBatchJUICE)
+VK_DEVICE_PFN(vkEndCommandBatchJUICE)
+
 ///* VK_KHR_buffer_device_address */
 //VK_DEVICE_EXT_PFN(vkGetBufferDeviceAddressKHR)
 //VK_DEVICE_EXT_PFN(vkGetBufferOpaqueCaptureAddressKHR)
