@@ -6414,6 +6414,9 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
      * Ideally there would be a flag to disable in-memory caching (but retain on-disk cache),
      * but that's extremely specific, so do what we gotta do. */
 
+    VkCommandBatchJUICE batch;
+    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
+
     if (SUCCEEDED(hr))
     {
         switch (bind_point)
@@ -6438,6 +6441,8 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
                 hr = E_INVALIDARG;
         }
     }
+
+    VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
 
     if (FAILED(hr))
     {
@@ -7137,9 +7142,12 @@ VkPipeline d3d12_pipeline_state_get_or_create_pipeline(struct d3d12_pipeline_sta
 
     FIXME("Compiling a fallback pipeline late!\n");
 
+    VkCommandBatchJUICE batch;
+    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
     vk_pipeline = d3d12_pipeline_state_create_pipeline_variant(state,
             &pipeline_key, dsv_format, VK_NULL_HANDLE, 0, dynamic_state_flags);
-
+    
+    VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
     if (!vk_pipeline)
     {
         ERR("Failed to create pipeline.\n");
