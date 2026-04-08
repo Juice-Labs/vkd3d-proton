@@ -4416,7 +4416,6 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         if (heap_flags & D3D12_HEAP_FLAG_SHARED)
         {
 #ifdef _WIN32
-            dedicated_requirements.prefersDedicatedAllocation = VK_TRUE;
 
             if (shared_handle && shared_handle != INVALID_HANDLE_VALUE)
             {
