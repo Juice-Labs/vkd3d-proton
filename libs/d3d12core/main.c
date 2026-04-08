@@ -377,20 +377,27 @@ static HRESULT d3d12_get_adapter(IDXGIAdapter **dxgi_adapter, IUnknown *adapter)
     IDXCoreAdapter *dxcore_adapter = NULL;
     IDXGIFactory4 *factory = NULL;
     HRESULT hr;
+    TRACE("JUICE-VKD3D: d3d12_get_adapter: ENTER PID=%lu adapter=%p\n",
+        (unsigned long)GetCurrentProcessId(), adapter);
 
     if (!adapter)
     {
+        TRACE("JUICE-VKD3D: d3d12_get_adapter: no adapter specified, creating DXGI factory to enumerate\n");
         if (FAILED(hr = CreateDXGIFactory1(&IID_IDXGIFactory4, (void **)&factory)))
         {
+            TRACE("JUICE-VKD3D: d3d12_get_adapter: CreateDXGIFactory1 FAILED hr=0x%lx\n", (unsigned long)hr);
             WARN("Failed to create DXGI factory, hr %#x.\n", (int)hr);
             goto done;
         }
+        TRACE("JUICE-VKD3D: d3d12_get_adapter: CreateDXGIFactory1 succeeded, factory=%p\n", factory);
 
         if (FAILED(hr = IDXGIFactory4_EnumAdapters(factory, 0, dxgi_adapter)))
         {
+            TRACE("JUICE-VKD3D: d3d12_get_adapter: EnumAdapters(0) FAILED hr=0x%lx\n", (unsigned long)hr);
             WARN("Failed to enumerate primary adapter, hr %#x.\n", (int)hr);
             goto done;
         }
+        TRACE("JUICE-VKD3D: d3d12_get_adapter: EnumAdapters(0) succeeded, adapter=%p\n", *dxgi_adapter);
     }
     else if (SUCCEEDED(hr = IUnknown_QueryInterface(adapter, &IID_IDXCoreAdapter, (void **)&dxcore_adapter)))
     {
@@ -427,10 +434,23 @@ static HRESULT d3d12_get_adapter(IDXGIAdapter **dxgi_adapter, IUnknown *adapter)
     }
     else
     {
+        TRACE("JUICE-VKD3D: d3d12_get_adapter: adapter=%p specified, querying IDXGIAdapter interface\n", adapter);
         if (FAILED(hr = IUnknown_QueryInterface(adapter, &IID_IDXGIAdapter, (void **)dxgi_adapter)))
         {
+            TRACE("JUICE-VKD3D: d3d12_get_adapter: QueryInterface for IDXGIAdapter FAILED hr=0x%lx\n", (unsigned long)hr);
             WARN("Invalid adapter %p, hr %#x.\n", adapter, (int)hr);
             goto done;
+        }
+        TRACE("JUICE-VKD3D: d3d12_get_adapter: QueryInterface succeeded, dxgi_adapter=%p\n", *dxgi_adapter);
+    }
+
+    {
+        DXGI_ADAPTER_DESC desc;
+        if (SUCCEEDED(IDXGIAdapter_GetDesc(*dxgi_adapter, &desc)))
+        {
+            TRACE("JUICE-VKD3D: d3d12_get_adapter: adapter desc: LUID={%lu,%ld} vendor=0x%x device=0x%x\n",
+                (unsigned long)desc.AdapterLuid.LowPart, (long)desc.AdapterLuid.HighPart,
+                desc.VendorId, desc.DeviceId);
         }
     }
 
@@ -482,6 +502,8 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
     if ((vr = pfn_vkEnumeratePhysicalDevices(vk_instance, &count, vk_physical_devices)) < 0)
         goto done;
 
+    TRACE("JUICE-VKD3D: d3d12_find_physical_device: searching for DXGI LUID={%lu,%ld} among %u Vulkan physical devices\n",
+        (unsigned long)adapter_desc->AdapterLuid.LowPart, (long)adapter_desc->AdapterLuid.HighPart, count);
     TRACE("Matching adapters by LUIDs.\n");
 
     for (i = 0; i < count; ++i)
@@ -492,6 +514,8 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
         if (properties2.properties.apiVersion < VKD3D_MIN_API_VERSION)
         {
             WARN("Skipped adapter %s as it is below our minimum API version.\n", properties2.properties.deviceName);
+            TRACE("JUICE-VKD3D: d3d12_find_physical_device: [%u] '%s' SKIPPED (below min API version)\n",
+                i, properties2.properties.deviceName);
             continue;
         }
 
@@ -503,8 +527,19 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
 
         pfn_vkGetPhysicalDeviceProperties2(vk_physical_devices[i], &properties2);
 
+        {
+            LUID vk_luid;
+            memcpy(&vk_luid, id_properties.deviceLUID, VK_LUID_SIZE);
+            TRACE("JUICE-VKD3D: d3d12_find_physical_device: [%u] '%s' vendor=0x%x device=0x%x deviceLUID={%lu,%ld} deviceLUIDValid=%d\n",
+                i, properties2.properties.deviceName,
+                properties2.properties.vendorID, properties2.properties.deviceID,
+                (unsigned long)vk_luid.LowPart, (long)vk_luid.HighPart,
+                id_properties.deviceLUIDValid);
+        }
+
         if (id_properties.deviceLUIDValid && !memcmp(id_properties.deviceLUID, &adapter_desc->AdapterLuid, VK_LUID_SIZE))
         {
+            TRACE("JUICE-VKD3D: d3d12_find_physical_device: [%u] LUID MATCH!\n", i);
             match = true;
 
             if (vk_physical_device)
@@ -532,12 +567,21 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
             }
 
             if (match)
+            {
+                TRACE("JUICE-VKD3D: d3d12_find_physical_device: [%u] SELECTED as matching device\n", i);
                 vk_physical_device = vk_physical_devices[i];
+            }
+        }
+        else
+        {
+            TRACE("JUICE-VKD3D: d3d12_find_physical_device: [%u] no LUID match (valid=%d)\n",
+                i, id_properties.deviceLUIDValid);
         }
     }
 
     if (!vk_physical_device)
     {
+        TRACE("JUICE-VKD3D: d3d12_find_physical_device: NO LUID match found, falling back to PCI ID matching\n");
         TRACE("Matching adapters by PCI IDs.\n");
 
         for (i = 0; i < count; ++i)
@@ -547,6 +591,8 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
             if (properties2.properties.deviceID == adapter_desc->DeviceId &&
                 properties2.properties.vendorID == adapter_desc->VendorId)
             {
+                TRACE("JUICE-VKD3D: d3d12_find_physical_device: PCI ID match at [%u] vendor=0x%x device=0x%x\n",
+                    i, properties2.properties.vendorID, properties2.properties.deviceID);
                 vk_physical_device = vk_physical_devices[i];
                 break;
             }
@@ -555,6 +601,7 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
 
     if (!vk_physical_device)
     {
+        TRACE("JUICE-VKD3D: d3d12_find_physical_device: NO match at all! Using first available device as fallback\n");
         FIXME("Could not find Vulkan physical device for DXGI adapter.\n");
         WARN("Using first available physical device...\n");
         vk_physical_device = vk_physical_devices[0];
@@ -670,6 +717,9 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDeviceFromFactory(
     TRACE("adapter %p, minimum_feature_level %#x, iid %s, device %p.\n",
             adapter, minimum_feature_level, debugstr_guid(iid), device);
 
+    TRACE("JUICE-VKD3D: d3d12core_CreateDevice: ENTER PID=%lu adapter=%p featureLevel=0x%x\n",
+        (unsigned long)GetCurrentProcessId(), adapter, minimum_feature_level);
+
 #ifdef _WIN32
     if (FAILED(hr = d3d12_get_adapter(&dxgi_adapter, adapter)))
         return hr;
@@ -704,6 +754,9 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDeviceFromFactory(
 
 #ifdef _WIN32
     device_create_info.vk_physical_device = d3d12_find_physical_device(instance, vulkan_vkGetInstanceProcAddr, &adapter_desc);
+    TRACE("JUICE-VKD3D: d3d12core_CreateDevice: found physical device=%p for adapter LUID={%lu,%ld}\n",
+        device_create_info.vk_physical_device,
+        (unsigned long)adapter_desc.AdapterLuid.LowPart, (long)adapter_desc.AdapterLuid.HighPart);
     device_create_info.parent = (IUnknown *)dxgi_adapter;
     memcpy(&device_create_info.adapter_luid, &adapter_desc.AdapterLuid, VK_LUID_SIZE);
 

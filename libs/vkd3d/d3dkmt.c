@@ -25,20 +25,34 @@
 void d3d12_device_open_kmt(struct d3d12_device *device)
 {
     D3DKMT_OPENADAPTERFROMLUID open_adapter = {0};
+    NTSTATUS status;
     open_adapter.AdapterLuid = device->adapter_luid;
 
-    if (D3DKMTOpenAdapterFromLuid(&open_adapter) == STATUS_SUCCESS)
+    TRACE("JUICE-VKD3D: d3d12_device_open_kmt: opening adapter for LUID={%lu,%ld}\n",
+        (unsigned long)device->adapter_luid.LowPart, (long)device->adapter_luid.HighPart);
+
+    status = D3DKMTOpenAdapterFromLuid(&open_adapter);
+    TRACE("JUICE-VKD3D: d3d12_device_open_kmt: D3DKMTOpenAdapterFromLuid returned status=0x%lx hAdapter=0x%x\n",
+        (unsigned long)status, open_adapter.hAdapter);
+
+    if (status == STATUS_SUCCESS)
     {
         D3DKMT_CREATEDEVICE create_device = {0};
         D3DKMT_CLOSEADAPTER close_adapter = {0};
+        NTSTATUS create_status;
 
         close_adapter.hAdapter = open_adapter.hAdapter;
         create_device.hAdapter = open_adapter.hAdapter;
-        if (D3DKMTCreateDevice(&create_device) == STATUS_SUCCESS)
+        create_status = D3DKMTCreateDevice(&create_device);
+        TRACE("JUICE-VKD3D: d3d12_device_open_kmt: D3DKMTCreateDevice returned status=0x%lx hDevice=0x%x\n",
+            (unsigned long)create_status, create_device.hDevice);
+        if (create_status == STATUS_SUCCESS)
             device->kmt_local = create_device.hDevice;
 
         D3DKMTCloseAdapter(&close_adapter);
     }
+
+    TRACE("JUICE-VKD3D: d3d12_device_open_kmt: DONE, device->kmt_local=0x%x\n", device->kmt_local);
 }
 
 void d3d12_device_close_kmt(struct d3d12_device *device)
@@ -96,9 +110,12 @@ void d3d12_resource_open_export_kmt(struct d3d12_resource *resource, struct d3d1
     VkResult vr;
     char dummy;
 
+    TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: resource=%p device->kmt_local=0x%x\n",
+        resource, device->kmt_local);
+
     if (!device->kmt_local)
     {
-        /* D3DKMT API isn't supported */
+        TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: kmt_local=0, D3DKMT API not supported, SKIPPING\n");
         return;
     }
 
@@ -116,12 +133,22 @@ void d3d12_resource_open_export_kmt(struct d3d12_resource *resource, struct d3d1
     win32_handle_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 
     if ((vr = VK_CALL(vkGetMemoryWin32HandleKHR(device->vk_device, &win32_handle_info, &open.hNtHandle))))
+    {
         ERR("Failed to get exported image memory handle, vr %d.\n", vr);
+        TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: vkGetMemoryWin32HandleKHR FAILED vr=%d\n", vr);
+    }
     else
     {
-        if (D3DKMTOpenResourceFromNtHandle(&open) == STATUS_SUCCESS)
+        NTSTATUS open_status;
+        TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: got NT handle=%p, calling D3DKMTOpenResourceFromNtHandle\n",
+            open.hNtHandle);
+        open_status = D3DKMTOpenResourceFromNtHandle(&open);
+        TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: D3DKMTOpenResourceFromNtHandle returned status=0x%lx hResource=0x%x\n",
+            (unsigned long)open_status, open.hResource);
+        if (open_status == STATUS_SUCCESS)
         {
             resource->kmt_local = open.hResource;
+            TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: resource->kmt_local=0x%x\n", resource->kmt_local);
 
             if (open.hKeyedMutex)
             {
@@ -137,6 +164,10 @@ void d3d12_resource_open_export_kmt(struct d3d12_resource *resource, struct d3d1
                 destroy_sync.hSyncObject = open.hSyncObject;
                 D3DKMTDestroySynchronizationObject(&destroy_sync);
             }
+        }
+        else
+        {
+            TRACE("JUICE-VKD3D: d3d12_resource_open_export_kmt: D3DKMTOpenResourceFromNtHandle FAILED, kmt_local stays 0\n");
         }
 
         CloseHandle(open.hNtHandle);
@@ -213,9 +244,12 @@ HRESULT d3d12_device_open_resource_descriptor(struct d3d12_device *device, HANDL
     union d3dkmt_desc d3dkmt = {0};
     UINT size;
 
+    TRACE("JUICE-VKD3D: d3d12_device_open_resource_descriptor: device=%p handle=%p kmt_local=0x%x\n",
+        device, handle, device->kmt_local);
+
     if (!device->kmt_local)
     {
-        /* D3DKMT API isn't supported */
+        TRACE("JUICE-VKD3D: d3d12_device_open_resource_descriptor: kmt_local=0, returning E_NOTIMPL\n");
         return E_NOTIMPL;
     }
 
