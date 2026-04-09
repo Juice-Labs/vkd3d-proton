@@ -4150,6 +4150,9 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
 
         if (heap_flags & D3D12_HEAP_FLAG_SHARED)
         {
+            TRACE("JUICE-VKD3D: d3d12_resource_create_committed: SHARED resource! dimension=%u width=%llu height=%u format=%u flags=0x%x shared_handle=%p\n",
+                object->desc.Dimension, (unsigned long long)object->desc.Width, object->desc.Height,
+                object->desc.Format, object->desc.Flags, shared_handle);
 #ifdef _WIN32
 
             if (shared_handle && shared_handle != INVALID_HANDLE_VALUE)
@@ -4208,7 +4211,12 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
             goto fail;
 
         if ((heap_flags & D3D12_HEAP_FLAG_SHARED) && export_info.handleTypes == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT)
+        {
+            TRACE("JUICE-VKD3D: d3d12_resource_create_committed: calling d3d12_resource_open_export_kmt for shared resource\n");
             d3d12_resource_open_export_kmt(object, device, allocation);
+            TRACE("JUICE-VKD3D: d3d12_resource_create_committed: d3d12_resource_open_export_kmt DONE, kmt_local=0x%x\n",
+                object->kmt_local);
+        }
 
         bind_info.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
         bind_info.pNext = NULL;

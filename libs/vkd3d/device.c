@@ -6685,18 +6685,39 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateSharedHandle(d3d12_device_if
         struct d3d12_resource *resource = impl_from_ID3D12Resource(resource_iface);
         VkMemoryGetWin32HandleInfoKHR win32_handle_info;
         VkResult vr;
+        NTSTATUS kmt_status;
+        TRACE("JUICE-VKD3D: CreateSharedHandle: ENTER PID=%lu TID=%lu\n",
+            (unsigned long)GetCurrentProcessId(), (unsigned long)GetCurrentThreadId());
+        TRACE("JUICE-VKD3D: CreateSharedHandle: resource=%p dimension=%u width=%llu height=%u mips=%u arraySize=%u format=%u flags=0x%x heap_flags=0x%x\n",
+            resource, resource->desc.Dimension, (unsigned long long)resource->desc.Width, resource->desc.Height,
+            resource->desc.MipLevels, resource->desc.DepthOrArraySize, resource->desc.Format,
+            resource->desc.Flags, resource->heap_flags);
 
         if (!(resource->heap_flags & D3D12_HEAP_FLAG_SHARED))
         {
+            TRACE("JUICE-VKD3D: CreateSharedHandle: REJECTED - resource heap_flags=0x%x does not include D3D12_HEAP_FLAG_SHARED\n",
+                resource->heap_flags);
             ID3D12Resource_Release(resource_iface);
             return DXGI_ERROR_INVALID_CALL;
         }
 
-        if (D3DKMTShareObjects(1, &resource->kmt_local, &attr, access, handle) == STATUS_SUCCESS)
+        TRACE("JUICE-VKD3D: CreateSharedHandle: resource IS shared. kmt_local=0x%x. Attempting D3DKMTShareObjects...\n",
+            resource->kmt_local);
+        kmt_status = D3DKMTShareObjects(1, &resource->kmt_local, &attr, access, handle);
+        TRACE("JUICE-VKD3D: CreateSharedHandle: D3DKMTShareObjects returned status=0x%lx handle=%p\n",
+            (unsigned long)kmt_status, handle ? *handle : NULL);
+
+        if (kmt_status == STATUS_SUCCESS)
         {
+            TRACE("JUICE-VKD3D: CreateSharedHandle: D3DKMTShareObjects SUCCEEDED - EARLY RETURN! handle=%p. "
+                "WARNING: vkd3d_set_shared_metadata will NOT be called on this path!\n",
+                handle ? *handle : NULL);
             ID3D12Resource_Release(resource_iface);
             return S_OK;
         }
+
+        TRACE("JUICE-VKD3D: CreateSharedHandle: D3DKMTShareObjects FAILED (status=0x%lx), falling through to Vulkan path\n",
+            (unsigned long)kmt_status);
 
         if (attributes)
             FIXME("attributes %p not handled.\n", attributes);
@@ -6710,13 +6731,19 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateSharedHandle(d3d12_device_if
         win32_handle_info.memory = resource->mem.device_allocation.vk_memory;
         win32_handle_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 
+        TRACE("JUICE-VKD3D: CreateSharedHandle: calling vkGetMemoryWin32HandleKHR vk_memory=%p\n",
+            (void*)(uintptr_t)resource->mem.device_allocation.vk_memory);
         vr = VK_CALL(vkGetMemoryWin32HandleKHR(device->vk_device, &win32_handle_info, handle));
+        TRACE("JUICE-VKD3D: CreateSharedHandle: vkGetMemoryWin32HandleKHR result=%d handle=%p\n",
+            vr, handle ? *handle : NULL);
 
         if (vr == VK_SUCCESS)
         {
             if (resource->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
             {
                 FIXME("Shared texture metadata structure only supports 2D textures.");
+                TRACE("JUICE-VKD3D: CreateSharedHandle: resource dimension=%u NOT 2D, skipping metadata\n",
+                    resource->desc.Dimension);
             }
             else
             {
@@ -6740,9 +6767,19 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateSharedHandle(d3d12_device_if
                 if (resource->desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)
                     metadata.BindFlags &= ~D3D11_BIND_SHADER_RESOURCE;
 
+                TRACE("JUICE-VKD3D: CreateSharedHandle: setting metadata on handle=%p: Width=%u Height=%u MipLevels=%u ArraySize=%u Format=%u BindFlags=0x%x MiscFlags=0x%x\n",
+                    *handle, metadata.Width, metadata.Height, metadata.MipLevels, metadata.ArraySize,
+                    (unsigned)metadata.Format, metadata.BindFlags, metadata.MiscFlags);
+
                 if (!vkd3d_set_shared_metadata(*handle, &metadata, sizeof(metadata)))
-                    ERR("Failed to set metadata for shared resource, importing created handle will fail.\n");
+                    TRACE("JUICE-VKD3D: CreateSharedHandle: vkd3d_set_shared_metadata FAILED for handle=%p!\n", *handle);
+                else
+                    TRACE("JUICE-VKD3D: CreateSharedHandle: vkd3d_set_shared_metadata SUCCEEDED for handle=%p\n", *handle);
             }
+        }
+        else
+        {
+            TRACE("JUICE-VKD3D: CreateSharedHandle: vkGetMemoryWin32HandleKHR FAILED vr=%d, returning E_FAIL\n", vr);
         }
 
         ID3D12Resource_Release(resource_iface);
@@ -7249,6 +7286,10 @@ static LUID * STDMETHODCALLTYPE d3d12_device_GetAdapterLuid(d3d12_device_iface *
     TRACE("iface %p, luid %p.\n", iface, luid);
 
     *luid = device->adapter_luid;
+
+    TRACE("JUICE-VKD3D: GetAdapterLuid: returning LUID={%lu,%ld} for device=%p PID=%lu\n",
+        (unsigned long)luid->LowPart, (long)luid->HighPart, device,
+        (unsigned long)GetCurrentProcessId());
 
     return luid;
 }
@@ -10056,6 +10097,9 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     device->vk_info.extension_names = NULL;
 
     device->adapter_luid = create_info->adapter_luid;
+    TRACE("JUICE-VKD3D: d3d12_device_create: adapter_luid={%lu,%ld} PID=%lu\n",
+        (unsigned long)device->adapter_luid.LowPart, (long)device->adapter_luid.HighPart,
+        (unsigned long)GetCurrentProcessId());
     device->removed_reason = S_OK;
 
     device->vk_device = VK_NULL_HANDLE;
