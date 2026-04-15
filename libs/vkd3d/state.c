@@ -5921,6 +5921,9 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
     object->refcount = 1;
     object->internal_refcount = 1;
 
+    VkCommandBatchJUICE batch;
+    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
+
     hr = S_OK;
 
     if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_GLOBAL_PIPELINE_CACHE))
@@ -5934,9 +5937,6 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
      * A workaround (pilfered from Fossilize) is to create our own pipeline cache and destroy it.
      * Ideally there would be a flag to disable in-memory caching (but retain on-disk cache),
      * but that's extremely specific, so do what we gotta do. */
-
-    VkCommandBatchJUICE batch;
-    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
 
     if (SUCCEEDED(hr))
     {
