@@ -2821,6 +2821,8 @@ HRESULT d3d12_rt_state_object_create(struct d3d12_device *device, const D3D12_ST
         struct d3d12_rt_state_object *parent,
         struct d3d12_rt_state_object **state_object)
 {
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkCommandBatchJUICE batch;
     struct d3d12_rt_state_object *object;
     HRESULT hr;
 
@@ -2829,7 +2831,11 @@ HRESULT d3d12_rt_state_object_create(struct d3d12_device *device, const D3D12_ST
 
     RT_TRACE("==== Create %s ====\n",
             desc->Type == D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE ? "RTPSO" : "Collection");
+
+    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
     hr = d3d12_state_object_init(object, device, desc, parent);
+    VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
+
     RT_TRACE("==== Done %p (hr = #%x) ====\n", (void *)object, (int)hr);
 
     if (FAILED(hr))

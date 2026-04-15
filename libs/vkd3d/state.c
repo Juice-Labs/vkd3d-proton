@@ -6306,6 +6306,7 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
     const struct d3d12_cached_pipeline_state *desc_cached_pso;
     struct d3d12_cached_pipeline_state cached_pso;
     struct d3d12_pipeline_state *object;
+    VkCommandBatchJUICE batch;
     HRESULT hr;
 
     if (!(object = vkd3d_malloc(sizeof(*object))))
@@ -6400,6 +6401,8 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
     object->refcount = 1;
     object->internal_refcount = 1;
 
+    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
+
     hr = S_OK;
 
     if (!VKD3D_CONFIG_FLAG_IS_SET(GLOBAL_PIPELINE_CACHE))
@@ -6413,9 +6416,6 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
      * A workaround (pilfered from Fossilize) is to create our own pipeline cache and destroy it.
      * Ideally there would be a flag to disable in-memory caching (but retain on-disk cache),
      * but that's extremely specific, so do what we gotta do. */
-
-    VkCommandBatchJUICE batch;
-    VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
 
     if (SUCCEEDED(hr))
     {
@@ -7107,6 +7107,7 @@ VkPipeline d3d12_pipeline_state_get_or_create_pipeline(struct d3d12_pipeline_sta
     struct d3d12_graphics_pipeline_state *graphics = &state->graphics;
     struct d3d12_device *device = state->device;
     struct vkd3d_pipeline_key pipeline_key;
+    VkCommandBatchJUICE batch;
     VkPipeline vk_pipeline;
 
     assert(d3d12_pipeline_state_is_graphics(state));
@@ -7142,7 +7143,6 @@ VkPipeline d3d12_pipeline_state_get_or_create_pipeline(struct d3d12_pipeline_sta
 
     FIXME("Compiling a fallback pipeline late!\n");
 
-    VkCommandBatchJUICE batch;
     VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
     vk_pipeline = d3d12_pipeline_state_create_pipeline_variant(state,
             &pipeline_key, dsv_format, VK_NULL_HANDLE, 0, dynamic_state_flags);
