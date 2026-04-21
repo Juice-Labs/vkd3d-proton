@@ -5963,8 +5963,6 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
         }
     }
 
-    VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
-
     if (FAILED(hr))
     {
         if (object->root_signature)
@@ -5975,6 +5973,8 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
         if (object->pipeline_type == VKD3D_PIPELINE_TYPE_GRAPHICS || object->pipeline_type == VKD3D_PIPELINE_TYPE_MESH_GRAPHICS)
             d3d12_pipeline_state_free_cached_desc(&object->graphics.cached_desc);
         VK_CALL(vkDestroyPipelineCache(device->vk_device, object->vk_pso_cache, NULL));
+        VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
+
         rwlock_destroy(&object->lock);
 
         vkd3d_free(object);
@@ -6025,6 +6025,7 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
         vkd3d_pipeline_library_store_pipeline_to_disk_cache(&device->disk_cache, object);
     }
 
+    VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
     TRACE("Created pipeline state %p.\n", object);
 
 #ifdef VKD3D_ENABLE_PROFILING
