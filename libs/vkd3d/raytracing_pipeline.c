@@ -2617,12 +2617,24 @@ static void d3d12_state_object_collect_variants(struct d3d12_rt_state_object *ob
     }
 }
 
+/* Inside-batch portion of RT state-object creation: parses subobjects and
+ * compiles all pipeline variants. The output `data` lives on the caller's
+ * stack so the post-batch finalize step (and the fail-path cleanup) can
+ * still reach it after vkEndCommandBatchJUICE.
+ *
+ * IMPORTANT (Phase 9 Task 9.1 / Option G): the readbacks
+ *   - d3d12_state_object_get_group_handles
+ *   - d3d12_state_object_pipeline_data_compute_default_stack_size
+ * must NOT run inside the batch bracket, otherwise the session-thread GET
+ * (vkGetRayTracingShaderGroupHandlesKHR / vkGetRayTracingShaderGroupStackSizeKHR)
+ * parks on WaitForClientHandle while the producer Create is still buffered
+ * client-side. Keep them in d3d12_state_object_init_finalize. */
 static HRESULT d3d12_state_object_init(struct d3d12_rt_state_object *object,
         struct d3d12_device *device,
         const D3D12_STATE_OBJECT_DESC *desc,
-        struct d3d12_rt_state_object *parent)
+        struct d3d12_rt_state_object *parent,
+        struct d3d12_rt_state_object_pipeline_data *data)
 {
-    struct d3d12_rt_state_object_pipeline_data data;
     HRESULT hr = S_OK;
     unsigned int i;
 
@@ -2649,35 +2661,57 @@ static HRESULT d3d12_state_object_init(struct d3d12_rt_state_object *object,
         object->flags |= D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS;
     }
 
-    memset(&data, 0, sizeof(data));
+    memset(data, 0, sizeof(*data));
 
-    if (FAILED(hr = d3d12_state_object_parse_subobjects(object, desc, parent, &data)))
-        goto fail;
+    if (FAILED(hr = d3d12_state_object_parse_subobjects(object, desc, parent, data)))
+        return hr;
 
-    if (FAILED(hr = d3d12_state_object_pipeline_data_find_global_state_objects(&data,
+    if (FAILED(hr = d3d12_state_object_pipeline_data_find_global_state_objects(data,
             &object->shader_config, &object->pipeline_config)))
-        goto fail;
+        return hr;
 
     /* Figure out how many variants we need. We'll need one pipeline variant
      * for every unique global root signature. */
-    d3d12_state_object_collect_variants(object, &data);
+    d3d12_state_object_collect_variants(object, data);
 
     for (i = 0; i < object->pipelines_count; i++)
     {
-        if (FAILED(hr = d3d12_state_object_compile_pipeline_variant(object, i, &data)))
-            goto fail;
+        if (FAILED(hr = d3d12_state_object_compile_pipeline_variant(object, i, data)))
+            return hr;
 
-        d3d12_state_object_pipeline_data_cleanup_modules(&data, object->device);
-        data.groups_count = 0;
-        data.vk_libraries_count = 0;
+        d3d12_state_object_pipeline_data_cleanup_modules(data, object->device);
+        data->groups_count = 0;
+        data->vk_libraries_count = 0;
     }
 
-    if (FAILED(hr = d3d12_state_object_get_group_handles(object, &data)))
+    return S_OK;
+}
+
+/* Outside-batch portion: runs the RT readbacks (group handles + default stack
+ * size), pilfers exports/entry-points off `data`, initializes the private
+ * store, and centralizes the success/fail cleanup. Caller passes the in-flight
+ * `hr` from d3d12_state_object_init: a failed `hr` short-circuits straight to
+ * the fail-path cleanup. */
+static HRESULT d3d12_state_object_init_finalize(struct d3d12_rt_state_object *object,
+        struct d3d12_rt_state_object_pipeline_data *data, HRESULT hr)
+{
+    unsigned int i;
+
+    if (FAILED(hr))
+        goto fail;
+
+    /* Readback path: vkGetRayTracingShaderGroupHandlesKHR (here) and
+     * vkGetRayTracingShaderGroupStackSizeKHR (via get_shader_stack_size from
+     * compute_default_stack_size below) both park the session thread on
+     * WaitForClientHandle until the producer pipeline lands on the wire.
+     * They are safe here because finalize runs after vkEndCommandBatchJUICE
+     * in d3d12_rt_state_object_create — see Phase 9 Task 9.1 / Option G. */
+    if (FAILED(hr = d3d12_state_object_get_group_handles(object, data)))
         goto fail;
 
     if (object->type == D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE)
     {
-        object->pipeline_stack_size = d3d12_state_object_pipeline_data_compute_default_stack_size(&data,
+        object->pipeline_stack_size = d3d12_state_object_pipeline_data_compute_default_stack_size(data,
                 &object->stack, object->pipeline_config.MaxTraceRecursionDepth);
     }
     else
@@ -2688,13 +2722,13 @@ static HRESULT d3d12_state_object_init(struct d3d12_rt_state_object *object,
 
     /* Spec says we need to hold a reference to the collection object, but it doesn't show up in API,
      * so we must assume private reference. */
-    if (data.collections_count)
+    if (data->collections_count)
     {
-        object->collections = vkd3d_malloc(data.collections_count * sizeof(*object->collections));
-        object->collections_count = data.collections_count;
-        for (i = 0; i < data.collections_count; i++)
+        object->collections = vkd3d_malloc(data->collections_count * sizeof(*object->collections));
+        object->collections_count = data->collections_count;
+        for (i = 0; i < data->collections_count; i++)
         {
-            object->collections[i] = data.collections[i].object;
+            object->collections[i] = data->collections[i].object;
             d3d12_state_object_inc_ref(object->collections[i]);
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
@@ -2710,26 +2744,26 @@ static HRESULT d3d12_state_object_init(struct d3d12_rt_state_object *object,
     }
 
     /* Pilfer the export table. */
-    object->exports = data.exports;
-    object->exports_size = data.exports_size;
-    object->exports_count = data.exports_count;
-    data.exports = NULL;
-    data.exports_size = 0;
-    data.exports_count = 0;
+    object->exports = data->exports;
+    object->exports_size = data->exports_size;
+    object->exports_count = data->exports_count;
+    data->exports = NULL;
+    data->exports_size = 0;
+    data->exports_count = 0;
 
     /* If parent object can depend on individual shaders, keep the entry point list around. */
     if (object->flags & D3D12_STATE_OBJECT_FLAG_ALLOW_EXTERNAL_DEPENDENCIES_ON_LOCAL_DEFINITIONS)
     {
-        object->entry_points = data.entry_points;
-        object->entry_points_count = data.entry_points_count;
-        data.entry_points = NULL;
-        data.entry_points_count = 0;
+        object->entry_points = data->entry_points;
+        object->entry_points_count = data->entry_points_count;
+        data->entry_points = NULL;
+        data->entry_points_count = 0;
     }
 
     if (FAILED(hr = vkd3d_private_store_init(&object->private_store)))
         goto fail;
 
-    d3d12_state_object_pipeline_data_cleanup(&data, object->device);
+    d3d12_state_object_pipeline_data_cleanup(data, object->device);
     d3d_destruction_notifier_init(&object->destruction_notifier, (IUnknown*)&object->ID3D12StateObject_iface);
     d3d12_device_add_ref(object->device);
     return S_OK;
@@ -2745,7 +2779,7 @@ fail:
          * we'll do the easiest thing. If we can compile everything, go for it. Otherwise, punt to link time. */
         WARN("Deferring compilation of COLLECTION due to ALLOW_LOCAL_DEPENDENCIES_ON_EXTERNAL_DEFINITIONS.\n");
         d3d12_state_object_cleanup(object);
-        object->deferred_data = d3d12_state_object_pipeline_data_defer(&data, object->device);
+        object->deferred_data = d3d12_state_object_pipeline_data_defer(data, object->device);
         if (FAILED(hr = vkd3d_private_store_init(&object->private_store)))
             d3d12_state_object_cleanup(object);
         else
@@ -2753,7 +2787,7 @@ fail:
     }
     else
     {
-        d3d12_state_object_pipeline_data_cleanup(&data, object->device);
+        d3d12_state_object_pipeline_data_cleanup(data, object->device);
         d3d12_state_object_cleanup(object);
     }
 
@@ -2765,21 +2799,35 @@ HRESULT d3d12_rt_state_object_create(struct d3d12_device *device, const D3D12_ST
         struct d3d12_rt_state_object **state_object)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    struct d3d12_rt_state_object_pipeline_data data;
     struct d3d12_rt_state_object *object;
-    HRESULT hr;
-    
+    VkCommandBatchJUICE batch;
+    HRESULT init_hr, hr;
+
     if (!(object = vkd3d_calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
     RT_TRACE("==== Create %s ====\n",
             desc->Type == D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE ? "RTPSO" : "Collection");
 
-    VkCommandBatchJUICE batch;
+    /* Inside-batch: parse + compile only. The RT readbacks in finalize must
+     * run *outside* the batch bracket — see Phase 9 Task 9.1 / Option G.
+     *
+     * `init_hr` captures the inside-batch result so a finalize-phase failure
+     * (e.g. vkd3d_private_store_init) is distinguishable from a parse/compile
+     * failure when debugging. Finalize takes init_hr as input and short-
+     * circuits to the fail-path if it is already FAILED. */
     VK_CALL(vkBeginCommandBatchJUICE(device->vk_device, &batch));
-    hr = d3d12_state_object_init(object, device, desc, parent);
+    init_hr = d3d12_state_object_init(object, device, desc, parent, &data);
     VK_CALL(vkEndCommandBatchJUICE(device->vk_device, batch));
 
-    RT_TRACE("==== Done %p (hr = #%x) ====\n", (void *)object, hr);
+    RT_TRACE("==== Init %p (hr = #%x) ====\n", (void *)object, init_hr);
+
+    /* Outside-batch: readbacks + finalize + fail-path cleanup. */
+    hr = d3d12_state_object_init_finalize(object, &data, init_hr);
+
+    RT_TRACE("==== Done %p (init_hr = #%x, hr = #%x) ====\n",
+            (void *)object, init_hr, hr);
 
     if (FAILED(hr))
     {
