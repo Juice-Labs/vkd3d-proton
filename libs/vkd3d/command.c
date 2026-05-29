@@ -8776,6 +8776,37 @@ static void d3d12_command_list_check_compute_barrier(struct d3d12_command_list *
             list->device, list->cmd.vk_command_buffer);
 }
 
+/* Make ray-tracing shader writes available to subsequent consumers after a TraceRays.
+ *
+ * vkd3d emits a forced post-dispatch availability barrier for compute shaders that require it
+ * (d3d12_command_list_check_compute_barrier), but there is no equivalent for ray tracing. As a
+ * result, UAV writes performed by raygen/hit/miss shaders could be consumed (e.g. by a denoiser
+ * compute pass) before the writes were made available, producing intermittent corruption such as
+ * flickering Lumen hardware ray traced reflections. Emit a conservative availability barrier after
+ * every TraceRays. TraceRays dispatches are infrequent, so the cost is negligible. */
+static void d3d12_command_list_trace_rays_post_barrier(struct d3d12_command_list *list)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+    VkMemoryBarrier2 vk_barrier;
+    VkDependencyInfo dep_info;
+
+    memset(&vk_barrier, 0, sizeof(vk_barrier));
+    memset(&dep_info, 0, sizeof(dep_info));
+    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    vk_barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    vk_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+
+    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_info.memoryBarrierCount = 1;
+    dep_info.pMemoryBarriers = &vk_barrier;
+
+    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
+    VKD3D_BREADCRUMB_TAG("TraceRaysPostBarrier");
+    VKD3D_BREADCRUMB_COMMAND(BARRIER);
+}
+
 static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_iface *iface,
         UINT x, UINT y, UINT z)
 {
@@ -16408,6 +16439,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
             }
 
             VK_CALL(vkCmdTraceRaysIndirect2KHR(list->cmd.vk_command_buffer, scratch.va));
+            d3d12_command_list_trace_rays_post_barrier(list);
             break;
 
         default:
@@ -18709,6 +18741,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchRays(d3d12_command_list
     VKD3D_BREADCRUMB_AUX64(callable_table.size);
     VKD3D_BREADCRUMB_AUX32(callable_table.stride);
     VKD3D_BREADCRUMB_COMMAND(TRACE_RAYS);
+
+    d3d12_command_list_trace_rays_post_barrier(list);
 }
 
 static VkFragmentShadingRateCombinerOpKHR vk_shading_rate_combiner_from_d3d12(D3D12_SHADING_RATE_COMBINER combiner)
