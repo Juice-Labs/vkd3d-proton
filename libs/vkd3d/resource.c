@@ -5818,6 +5818,77 @@ void d3d12_desc_create_cbv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
             d.payload + device->bindless_state.descriptor_buffer_packed_raw_buffer_offset));
 }
 
+/* Dedupe cache for vkd3d_juice_tag_buffer_view. Open-addressed, single probe,
+ * overwrite on collision. Entries are full 64-bit keys so a hit means this
+ * exact (page-aligned range, view type) was already forwarded to the ICD.
+ * Accessed without synchronization by design: tagging is idempotent, so a
+ * torn or stale entry only costs one redundant ICD call. */
+#define VKD3D_JUICE_VIEW_TAG_CACHE_SIZE (64u * 1024u)
+static uint64_t vkd3d_juice_view_tag_cache[VKD3D_JUICE_VIEW_TAG_CACHE_SIZE];
+
+void vkd3d_juice_tag_buffer_view(struct d3d12_device *device,
+        VkDeviceAddress va, VkDeviceSize size, VkD3D12DescViewTypeJUICE view_type)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkD3D12BufferViewCreateInfoJUICE create_info;
+    const struct vkd3d_unique_resource *resource;
+    VkDeviceAddress aligned_va, aligned_end;
+    VkDeviceSize buffer_offset;
+    uint64_t key;
+    uint32_t slot;
+
+    if (!va || !vk_procs->vkCreateBufferViewJUICE)
+        return;
+
+    /* Page-align the range: the ICD tracks usage at page granularity anyway,
+     * and aligning collapses all the suballocated views that share pages
+     * (constant buffer rings especially) into few cache entries. */
+    aligned_va = va & ~(VkDeviceAddress)4095;
+    aligned_end = (va + size + 4095) & ~(VkDeviceAddress)4095;
+
+    key = aligned_va ^ (aligned_end * 0x9e3779b97f4a7c15ull) ^ ((uint64_t)view_type << 56);
+    /* splitmix64 finalizer */
+    key ^= key >> 30;
+    key *= 0xbf58476d1ce4e5b9ull;
+    key ^= key >> 27;
+    key *= 0x94d049bb133111ebull;
+    key ^= key >> 31;
+    if (!key)
+        key = 1;
+
+    slot = (uint32_t)key & (VKD3D_JUICE_VIEW_TAG_CACHE_SIZE - 1);
+    if (vkd3d_juice_view_tag_cache[slot] == key)
+        return;
+
+    /* Only whole vkd3d_memory_allocations are registered in the va_map, so
+     * the deref'd resource's VA base corresponds to memory offset 0 and its
+     * global buffer is bound at offset 0: VA-relative offsets are memory
+     * offsets. */
+    resource = vkd3d_va_map_deref(&device->memory_allocator.va_map, va);
+    if (!resource || !resource->vk_buffer || !resource->allocation)
+        return;
+    if (resource->allocation->device_allocation.vk_memory == VK_NULL_HANDLE)
+        return;
+
+    buffer_offset = va - resource->va;
+    if (buffer_offset >= resource->size)
+        return;
+
+    if (!size || size > resource->size - buffer_offset)
+        size = resource->size - buffer_offset;
+
+    create_info.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
+    create_info.pNext = NULL;
+    create_info.d3d12Type = view_type;
+    create_info.buffer = resource->vk_buffer;
+    create_info.offset = buffer_offset;
+    create_info.size = size;
+
+    VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &create_info));
+
+    vkd3d_juice_view_tag_cache[slot] = key;
+}
+
 void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
         struct d3d12_device *device, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc)
 {
@@ -5860,6 +5931,12 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
     }
 
     d = d3d12_desc_decode_va(desc_va);
+
+    /* Route the constant data's memory pages to Juice's uniform (sub-page
+     * diffing) compression path. Covers both the descriptor-buffer and
+     * legacy descriptor paths below. */
+    vkd3d_juice_tag_buffer_view(device, desc->BufferLocation, desc->SizeInBytes,
+            VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE);
 
     info_index = vkd3d_bindless_state_find_set_info_index_fast(device,
             VKD3D_BINDLESS_STATE_INFO_INDEX_MUTABLE_SPLIT_RAW,
@@ -6298,6 +6375,11 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
     vkd3d_get_metadata_buffer_view_for_resource(device, resource,
             desc->Format, desc->Buffer.FirstElement, desc->Buffer.NumElements,
             desc->Buffer.StructureByteStride, &d.view->info.buffer);
+
+    /* Tag the viewed range for Juice's typed compression streams. Covers
+     * both the descriptor-buffer and legacy descriptor paths below. */
+    vkd3d_juice_tag_buffer_view(device, d.view->info.buffer.va, d.view->info.buffer.range,
+            VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
 
     if (emit_ssbo)
     {
@@ -7091,6 +7173,11 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
             desc->Format, desc->Buffer.FirstElement, desc->Buffer.NumElements,
             desc->Buffer.StructureByteStride, &d.view->info.buffer);
     d.view->info.buffer.flags |= VKD3D_DESCRIPTOR_FLAG_RAW_VA_AUX_BUFFER;
+
+    /* Tag the viewed range for Juice's typed compression streams. Covers
+     * both the descriptor-buffer and legacy descriptor paths below. */
+    vkd3d_juice_tag_buffer_view(device, d.view->info.buffer.va, d.view->info.buffer.range,
+            VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE);
 
     if (emit_ssbo)
     {

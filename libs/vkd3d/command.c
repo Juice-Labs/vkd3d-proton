@@ -13049,6 +13049,9 @@ static void d3d12_command_list_set_root_descriptor(struct d3d12_command_list *li
     VKD3D_BREADCRUMB_COMMAND_STATE(ROOT_DESC);
 }
 
+/* D3D12 root CBVs address at most 64KiB of constants. */
+#define VKD3D_JUICE_ROOT_CBV_TAG_SIZE (65536u)
+
 static void STDMETHODCALLTYPE d3d12_command_list_SetComputeRootConstantBufferView(
         d3d12_command_list_iface *iface, UINT root_parameter_index, D3D12_GPU_VIRTUAL_ADDRESS address)
 {
@@ -13056,6 +13059,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetComputeRootConstantBufferVie
 
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
+
+    vkd3d_juice_tag_buffer_view(list->device, address, VKD3D_JUICE_ROOT_CBV_TAG_SIZE,
+            VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE);
 
     d3d12_command_list_set_root_descriptor(list, &list->compute_bindings,
             root_parameter_index, address);
@@ -13069,6 +13075,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetGraphicsRootConstantBufferVi
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
 
+    vkd3d_juice_tag_buffer_view(list->device, address, VKD3D_JUICE_ROOT_CBV_TAG_SIZE,
+            VK_D3D12_DESC_VIEW_TYPE_CONSTANT_BUFFER_JUICE);
+
     d3d12_command_list_set_root_descriptor(list, &list->graphics_bindings,
             root_parameter_index, address);
 }
@@ -13080,6 +13089,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetComputeRootShaderResourceVie
 
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
+
+    /* Root SRVs are unbounded; tag through to the end of the resource. */
+    vkd3d_juice_tag_buffer_view(list->device, address, 0,
+            VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
 
     d3d12_command_list_set_root_descriptor(list, &list->compute_bindings,
             root_parameter_index, address);
@@ -13093,6 +13106,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetGraphicsRootShaderResourceVi
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
 
+    /* Root SRVs are unbounded; tag through to the end of the resource. */
+    vkd3d_juice_tag_buffer_view(list->device, address, 0,
+            VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+
     d3d12_command_list_set_root_descriptor(list, &list->graphics_bindings,
             root_parameter_index, address);
 }
@@ -13105,6 +13122,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetComputeRootUnorderedAccessVi
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
 
+    /* Root UAVs are unbounded; tag through to the end of the resource. */
+    vkd3d_juice_tag_buffer_view(list->device, address, 0,
+            VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE);
+
     d3d12_command_list_set_root_descriptor(list, &list->compute_bindings,
             root_parameter_index, address);
 }
@@ -13116,6 +13137,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetGraphicsRootUnorderedAccessV
 
     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
             iface, root_parameter_index, address);
+
+    /* Root UAVs are unbounded; tag through to the end of the resource. */
+    vkd3d_juice_tag_buffer_view(list->device, address, 0,
+            VK_D3D12_DESC_VIEW_TYPE_UNORDERED_ACCESS_JUICE);
 
     d3d12_command_list_set_root_descriptor(list, &list->graphics_bindings,
             root_parameter_index, address);
@@ -13165,6 +13190,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetIndexBuffer(d3d12_command_
             list->index_buffer.buffer = resource->vk_buffer;
             list->index_buffer.offset = view->BufferLocation - resource->va;
             list->index_buffer.size = view->SizeInBytes;
+
+            /* Route the index data's memory pages to Juice's Index
+             * compression stream (deduplicated internally). */
+            vkd3d_juice_tag_buffer_view(list->device, view->BufferLocation, view->SizeInBytes,
+                    VK_D3D12_DESC_VIEW_TYPE_INDEX_BUFFER_JUICE);
         }
         else
         {
@@ -13218,21 +13248,15 @@ static void STDMETHODCALLTYPE d3d12_command_list_IASetVertexBuffers(d3d12_comman
         {
             if ((resource = vkd3d_va_map_deref(&list->device->memory_allocator.va_map, views[i].BufferLocation)))
             {
-                VkD3D12BufferViewCreateInfoJUICE bufferViewCreateInfo;
-
                 buffer = resource->vk_buffer;
                 offset = views[i].BufferLocation - resource->va;
                 stride = views[i].StrideInBytes;
                 size = views[i].SizeInBytes;
 
-                /*bufferViewCreateInfo.sType = VK_STRUCTURE_TYPE_D3D12_BUFFER_VIEW_CREATE_INFO_JUICE;
-                bufferViewCreateInfo.pNext = NULL;
-                bufferViewCreateInfo.d3d12Type = VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE;
-                bufferViewCreateInfo.buffer = buffer;
-                bufferViewCreateInfo.offset = offset;
-                bufferViewCreateInfo.size = size;
-
-                VK_CALL(vkCreateBufferViewJUICE(resource->allocation->device_allocation.vk_memory, &bufferViewCreateInfo));*/
+                /* Route the vertex data's memory pages to Juice's Vertex
+                 * compression stream (deduplicated internally). */
+                vkd3d_juice_tag_buffer_view(list->device, views[i].BufferLocation, size,
+                        VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE);
             }
             else
             {
@@ -16225,6 +16249,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
 
     unrolled_stride = signature_desc->ByteStride;
 
+    /* The GPU consumes these ranges via raw VAs; tag them so Juice knows the
+     * pages are referenced (and routes them to a typed stream). */
+    if (arg_impl)
+    {
+        vkd3d_juice_tag_buffer_view(list->device, arg_impl->res.va + arg_buffer_offset,
+                (VkDeviceSize)max_command_count * signature_desc->ByteStride,
+                VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+    }
+    if (count_impl)
+    {
+        vkd3d_juice_tag_buffer_view(list->device, count_impl->res.va + count_buffer_offset,
+                sizeof(uint32_t), VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+    }
+
     VKD3D_BREADCRUMB_TAG("ExecuteIndirect [MaxCommandCount, ArgBuffer cookie, ArgBuffer offset, Count cookie, Count offset]");
     VKD3D_BREADCRUMB_AUX32(max_command_count);
     VKD3D_BREADCRUMB_COOKIE(arg_impl->res.cookie.index);
@@ -18362,6 +18400,63 @@ static void STDMETHODCALLTYPE d3d12_command_list_BuildRaytracingAccelerationStru
     }
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
+
+    /* Acceleration structure inputs are consumed through raw GPU VAs; tag
+     * them so Juice knows the pages are referenced by this build. */
+    if (desc->Inputs.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL)
+    {
+        if (desc->Inputs.InstanceDescs)
+        {
+            VkDeviceSize instance_size = desc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY
+                    ? sizeof(D3D12_RAYTRACING_INSTANCE_DESC) : sizeof(D3D12_GPU_VIRTUAL_ADDRESS);
+            vkd3d_juice_tag_buffer_view(list->device, desc->Inputs.InstanceDescs,
+                    desc->Inputs.NumDescs * instance_size,
+                    VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+        }
+    }
+    else
+    {
+        unsigned int input_idx;
+        for (input_idx = 0; input_idx < desc->Inputs.NumDescs; input_idx++)
+        {
+            const D3D12_RAYTRACING_GEOMETRY_DESC *geom_desc;
+            if (desc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY)
+                geom_desc = &desc->Inputs.pGeometryDescs[input_idx];
+            else
+                geom_desc = desc->Inputs.ppGeometryDescs[input_idx];
+
+            if (geom_desc->Type == D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES)
+            {
+                const D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC *tri = &geom_desc->Triangles;
+                if (tri->VertexBuffer.StartAddress)
+                {
+                    vkd3d_juice_tag_buffer_view(list->device, tri->VertexBuffer.StartAddress,
+                            tri->VertexCount * tri->VertexBuffer.StrideInBytes,
+                            VK_D3D12_DESC_VIEW_TYPE_VERTEX_BUFFER_JUICE);
+                }
+                if (tri->IndexBuffer)
+                {
+                    vkd3d_juice_tag_buffer_view(list->device, tri->IndexBuffer,
+                            (VkDeviceSize)tri->IndexCount * (tri->IndexFormat == DXGI_FORMAT_R16_UINT ? 2 : 4),
+                            VK_D3D12_DESC_VIEW_TYPE_INDEX_BUFFER_JUICE);
+                }
+                if (tri->Transform3x4)
+                {
+                    vkd3d_juice_tag_buffer_view(list->device, tri->Transform3x4,
+                            sizeof(float) * 12, VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+                }
+            }
+            else if (geom_desc->Type == D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS)
+            {
+                if (geom_desc->AABBs.AABBs.StartAddress)
+                {
+                    vkd3d_juice_tag_buffer_view(list->device, geom_desc->AABBs.AABBs.StartAddress,
+                            geom_desc->AABBs.AABBCount * geom_desc->AABBs.AABBs.StrideInBytes,
+                            VK_D3D12_DESC_VIEW_TYPE_SHADER_RESOURCE_JUICE);
+                }
+            }
+        }
+    }
 
     /* Do not batch TLAS and BLAS builds into the same command, since doing so
      * is disallowed if there are data dependencies between the builds. This

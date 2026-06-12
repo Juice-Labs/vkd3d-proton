@@ -377,6 +377,17 @@ VkMicromapEXT vkd3d_va_map_place_opacity_micromap(struct vkd3d_va_map *va_map,
 void vkd3d_va_map_init(struct vkd3d_va_map *va_map);
 void vkd3d_va_map_cleanup(struct vkd3d_va_map *va_map);
 
+/* Forwards D3D12 view-type information for a buffer range to the Juice ICD
+ * (vkCreateBufferViewJUICE), which uses it to route the underlying memory
+ * pages to typed compression streams (constant buffers in particular hit the
+ * sub-page diffing path). Tagging is idempotent and ranges stabilize after
+ * warmup, so calls are deduplicated through a small hash cache and the
+ * steady-state cost is a single hash probe. A size of 0 means "to the end of
+ * the underlying resource" (unbounded root descriptor views). */
+struct d3d12_device;
+void vkd3d_juice_tag_buffer_view(struct d3d12_device *device,
+        VkDeviceAddress va, VkDeviceSize size, VkD3D12DescViewTypeJUICE view_type);
+
 struct vkd3d_private_store
 {
     pthread_mutex_t mutex;
