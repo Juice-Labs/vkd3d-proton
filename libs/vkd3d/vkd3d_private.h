@@ -82,8 +82,10 @@ typedef ID3D12Fence1 d3d12_fence_iface;
 
 struct d3d12_command_list;
 struct d3d12_command_allocator;
+struct d3d12_command_queue;
 struct d3d12_device;
 struct d3d12_resource;
+struct dxgi_vk_swap_chain;
 
 struct vkd3d_bindless_set_info;
 struct vkd3d_dynamic_state;
@@ -244,6 +246,16 @@ struct vkd3d_instance
 
 extern uint64_t vkd3d_config_flags;
 extern struct vkd3d_shader_quirk_info vkd3d_shader_quirk_info;
+/* Lumion 2026: Present before the Execute that fills the viewport; blit after Execute
+ * and sample the offscreen HDR RT instead of the often-empty DXGI backbuffer. */
+extern bool vkd3d_defer_swapchain_present;
+
+void vkd3d_lumion_note_viewport_rt(struct d3d12_resource *resource);
+void vkd3d_lumion_set_present_size(UINT width, UINT height);
+struct d3d12_resource *vkd3d_lumion_acquire_viewport_rt(void);
+void vkd3d_lumion_release_viewport_rt(struct d3d12_resource *resource);
+void dxgi_vk_swap_chain_queue_deferred_present(struct dxgi_vk_swap_chain *chain);
+void dxgi_vk_swap_chain_flush_deferred_present(struct d3d12_command_queue *queue);
 
 struct vkd3d_queue_timeline_trace_cookie
 {
@@ -1158,6 +1170,9 @@ struct d3d12_resource
 
     struct vkd3d_private_store private_store;
     struct d3d_destruction_notifier destruction_notifier;
+
+    /* Non-NULL if this resource is a DXGI swapchain user backbuffer. */
+    struct dxgi_vk_swap_chain *swapchain_owner;
 };
 
 static inline bool d3d12_resource_is_buffer(const struct d3d12_resource *resource)
@@ -3418,6 +3433,10 @@ struct vkd3d_queue
     VkSemaphoreSubmitInfo *wait_semaphores;
     size_t wait_semaphores_size;
     uint32_t wait_count;
+
+    /* Lumion deferred Present: blit runs after the next Execute on this queue. */
+    struct dxgi_vk_swap_chain *pending_present_swapchain;
+    uint64_t pending_present_defer_timeline;
 };
 
 VkQueue vkd3d_queue_acquire(struct vkd3d_queue *queue);

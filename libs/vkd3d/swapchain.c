@@ -196,6 +196,10 @@ struct dxgi_vk_swap_chain
         uint64_t low_latency_sem_value;
 
         struct low_latency_state low_latency_state;
+
+        /* Cached view of Lumion offscreen viewport RT for present blit sampling. */
+        VkImageView lumion_viewport_view;
+        VkImage lumion_viewport_image;
     } present;
 
     struct dxgi_vk_swap_chain_present_request request, request_ring[DXGI_MAX_SWAP_CHAIN_BUFFERS];
@@ -258,6 +262,185 @@ struct dxgi_vk_swap_chain
 };
 
 static void dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value);
+static void dxgi_vk_swap_chain_present_callback(void *chain_);
+static void dxgi_vk_swap_chain_deferred_present_callback(void *chain_);
+
+/* ---- Lumion offscreen viewport RT tracking -------------------------------- */
+
+static pthread_mutex_t lumion_viewport_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct d3d12_resource *lumion_viewport_rt;
+static int lumion_viewport_score;
+static UINT lumion_present_width;
+static UINT lumion_present_height;
+static uint32_t lumion_sample_log_counter;
+
+void vkd3d_lumion_set_present_size(UINT width, UINT height)
+{
+    if (!vkd3d_defer_swapchain_present)
+        return;
+
+    pthread_mutex_lock(&lumion_viewport_lock);
+    if (lumion_present_width != width || lumion_present_height != height)
+    {
+        lumion_present_width = width;
+        lumion_present_height = height;
+        if (lumion_viewport_rt &&
+                (lumion_viewport_rt->desc.Width != width || lumion_viewport_rt->desc.Height != height))
+        {
+            d3d12_resource_decref(lumion_viewport_rt);
+            lumion_viewport_rt = NULL;
+            lumion_viewport_score = 0;
+        }
+    }
+    pthread_mutex_unlock(&lumion_viewport_lock);
+}
+
+static int vkd3d_lumion_score_viewport_rt(const struct d3d12_resource *resource)
+{
+    UINT width = (UINT)resource->desc.Width;
+    UINT height = resource->desc.Height;
+    int score = 0;
+
+    if (width == height)
+        return -1;
+    if (height * 2 < width)
+        return -1;
+
+    if (lumion_present_width && lumion_present_height)
+    {
+        if (width == lumion_present_width && height == lumion_present_height)
+        {
+            score += 1000;
+        }
+        else
+        {
+            UINT dw = width > lumion_present_width ? width - lumion_present_width
+                    : lumion_present_width - width;
+            UINT dh = height > lumion_present_height ? height - lumion_present_height
+                    : lumion_present_height - height;
+            if (dw * 4 > lumion_present_width || dh * 4 > lumion_present_height)
+                return -1;
+        }
+    }
+
+    switch (resource->desc.Format)
+    {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            score += 100;
+            break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            score += 50;
+            break;
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            break;
+        default:
+            return -1;
+    }
+
+    return score;
+}
+
+void vkd3d_lumion_note_viewport_rt(struct d3d12_resource *resource)
+{
+    int score;
+
+    if (!vkd3d_defer_swapchain_present || !resource)
+        return;
+    if (resource->swapchain_owner)
+        return;
+    if (resource->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        return;
+    if (!(resource->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+        return;
+    if (resource->desc.Width < 640 || resource->desc.Height < 360)
+        return;
+    if (resource->desc.SampleDesc.Count > 1)
+        return;
+
+    score = vkd3d_lumion_score_viewport_rt(resource);
+    if (score < 0)
+        return;
+
+    pthread_mutex_lock(&lumion_viewport_lock);
+    if (!lumion_viewport_rt || score > lumion_viewport_score)
+    {
+        if (lumion_viewport_rt)
+            d3d12_resource_decref(lumion_viewport_rt);
+        lumion_viewport_rt = resource;
+        d3d12_resource_incref(resource);
+        lumion_viewport_score = score;
+    }
+    pthread_mutex_unlock(&lumion_viewport_lock);
+}
+
+struct d3d12_resource *vkd3d_lumion_acquire_viewport_rt(void)
+{
+    struct d3d12_resource *resource = NULL;
+
+    if (!vkd3d_defer_swapchain_present)
+        return NULL;
+
+    pthread_mutex_lock(&lumion_viewport_lock);
+    if (lumion_viewport_rt)
+    {
+        resource = lumion_viewport_rt;
+        d3d12_resource_incref(resource);
+    }
+    pthread_mutex_unlock(&lumion_viewport_lock);
+    return resource;
+}
+
+void vkd3d_lumion_release_viewport_rt(struct d3d12_resource *resource)
+{
+    if (resource)
+        d3d12_resource_decref(resource);
+}
+
+static void dxgi_vk_swap_chain_deferred_present_callback(void *chain_)
+{
+    struct dxgi_vk_swap_chain *chain = chain_;
+    dxgi_vk_swap_chain_present_callback(chain);
+    dxgi_vk_swap_chain_decref(chain);
+}
+
+void dxgi_vk_swap_chain_queue_deferred_present(struct dxgi_vk_swap_chain *chain)
+{
+    struct vkd3d_queue *vkd3d_queue = chain->queue->vkd3d_queue;
+    struct dxgi_vk_swap_chain *previous = NULL;
+
+    pthread_mutex_lock(&vkd3d_queue->mutex);
+    previous = vkd3d_queue->pending_present_swapchain;
+    vkd3d_queue->pending_present_swapchain = chain;
+    vkd3d_queue->pending_present_defer_timeline++;
+    dxgi_vk_swap_chain_incref(chain);
+    pthread_mutex_unlock(&vkd3d_queue->mutex);
+
+    /* Previous Present had no Execute between presents; flush it so progress continues. */
+    if (previous)
+        d3d12_command_queue_enqueue_callback(previous->queue,
+                dxgi_vk_swap_chain_deferred_present_callback, previous);
+}
+
+void dxgi_vk_swap_chain_flush_deferred_present(struct d3d12_command_queue *queue)
+{
+    struct vkd3d_queue *vkd3d_queue;
+    struct dxgi_vk_swap_chain *chain;
+
+    if (!vkd3d_defer_swapchain_present || !queue)
+        return;
+
+    vkd3d_queue = queue->vkd3d_queue;
+    pthread_mutex_lock(&vkd3d_queue->mutex);
+    chain = vkd3d_queue->pending_present_swapchain;
+    vkd3d_queue->pending_present_swapchain = NULL;
+    pthread_mutex_unlock(&vkd3d_queue->mutex);
+
+    if (chain)
+        d3d12_command_queue_enqueue_callback(queue,
+                dxgi_vk_swap_chain_deferred_present_callback, chain);
+}
 
 static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain *chain,
         VkSemaphore vk_semaphore, bool blocking)
@@ -300,7 +483,7 @@ static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain 
         dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
 }
 
-static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_swap_chain *chain, uint32_t index)
+static bool dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_swap_chain *chain, uint32_t index)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     VkFenceCreateInfo fence_info;
@@ -316,13 +499,12 @@ static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_
             if (vr)
             {
                 ERR("Failed to wait for fences, vr %d\n", vr);
+                return false;
             }
-            else
-            {
-                VK_CALL(vkResetFences(chain->queue->device->vk_device,
-                        1, &chain->present.vk_swapchain_fences[index]));
-                chain->present.vk_swapchain_fences_signalled[index] = false;
-            }
+
+            VK_CALL(vkResetFences(chain->queue->device->vk_device,
+                    1, &chain->present.vk_swapchain_fences[index]));
+            chain->present.vk_swapchain_fences_signalled[index] = false;
         }
     }
     else
@@ -333,8 +515,13 @@ static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_
         vr = VK_CALL(vkCreateFence(chain->queue->device->vk_device,
                 &fence_info, NULL, &chain->present.vk_swapchain_fences[index]));
         if (vr)
+        {
             ERR("Failed to create swapchain fence, vr %d.\n", vr);
+            return false;
+        }
     }
+
+    return true;
 }
 
 static void dxgi_vk_swap_chain_drain_swapchain_fences(struct dxgi_vk_swap_chain *chain)
@@ -382,7 +569,19 @@ static void dxgi_vk_swap_chain_drain_user_images(struct dxgi_vk_swap_chain *chai
 
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 {
+    struct vkd3d_queue *vkd3d_queue = chain->queue->vkd3d_queue;
+    struct dxgi_vk_swap_chain *pending;
     unsigned int i;
+
+    pthread_mutex_lock(&vkd3d_queue->mutex);
+    pending = vkd3d_queue->pending_present_swapchain;
+    if (pending == chain)
+        vkd3d_queue->pending_present_swapchain = NULL;
+    else
+        pending = NULL;
+    pthread_mutex_unlock(&vkd3d_queue->mutex);
+    if (pending)
+        dxgi_vk_swap_chain_decref(pending);
 
     /* This functions as a DRAIN of the D3D12 queue.
      * All CPU operations that were queued must have been submitted to Vulkan now.
@@ -482,6 +681,10 @@ static void dxgi_vk_swap_chain_cleanup_common(struct dxgi_vk_swap_chain *chain)
         VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.vk_acquire_semaphore[i], NULL));
     for (i = 0; i < ARRAY_SIZE(chain->present.vk_swapchain_fences); i++)
         VK_CALL(vkDestroyFence(chain->queue->device->vk_device, chain->present.vk_swapchain_fences[i], NULL));
+
+    VK_CALL(vkDestroyImageView(chain->queue->device->vk_device, chain->present.lumion_viewport_view, NULL));
+    chain->present.lumion_viewport_view = VK_NULL_HANDLE;
+    chain->present.lumion_viewport_image = VK_NULL_HANDLE;
 
     VK_CALL(vkDestroySwapchainKHR(chain->queue->device->vk_device, chain->present.vk_swapchain, NULL));
 
@@ -723,6 +926,7 @@ static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_ch
         /* We need to hold a private reference to the resource, not a public one. */
         vkd3d_resource_incref((ID3D12Resource *)&chain->user.backbuffers[i]->ID3D12Resource_iface);
         ID3D12Resource2_Release(&chain->user.backbuffers[i]->ID3D12Resource_iface);
+        chain->user.backbuffers[i]->swapchain_owner = chain;
 
         view_info.format = chain->user.backbuffers[i]->format->vk_format;
         view_info.image = chain->user.backbuffers[i]->res.vk_image;
@@ -948,8 +1152,6 @@ static bool dxgi_vk_swap_chain_present_is_occluded(struct dxgi_vk_swap_chain *ch
 #endif
 }
 
-static void dxgi_vk_swap_chain_present_callback(void *chain);
-
 static void dxgi_vk_swap_chain_wait_internal_handle(struct dxgi_vk_swap_chain *chain, bool low_latency_enable)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1035,11 +1237,20 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
         return S_OK;
 
     /* If we missed the event signal last frame, we have to wait for it now.
-     * Otherwise, we end up in a floating state where our waits and thread signals might not stay in sync anymore. */
+     * Otherwise, we end up in a floating state where our waits and thread signals might not stay in sync anymore.
+     * With deferred Present the blit has not run yet, so never block the app thread here. */
     if (chain->outstanding_present_request)
     {
-        vkd3d_native_sync_handle_acquire(chain->present_request_done_event);
-        chain->outstanding_present_request = false;
+        if (vkd3d_defer_swapchain_present)
+        {
+            if (vkd3d_native_sync_handle_acquire_timeout(chain->present_request_done_event, 0))
+                chain->outstanding_present_request = false;
+        }
+        else
+        {
+            vkd3d_native_sync_handle_acquire(chain->present_request_done_event);
+            chain->outstanding_present_request = false;
+        }
     }
 
     assert(chain->user.index < chain->desc.BufferCount);
@@ -1092,9 +1303,18 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
     }
 
     /* Need to process this task in queue thread to deal with wait-before-signal.
-     * All interesting works happens in the callback. */
+     * All interesting works happens in the callback.
+     * Lumion presents before Execute fills the viewport; defer the blit until after Execute. */
     chain->user.blit_count += 1;
-    d3d12_command_queue_enqueue_callback(chain->queue, dxgi_vk_swap_chain_present_callback, chain);
+    if (vkd3d_defer_swapchain_present)
+    {
+        vkd3d_lumion_set_present_size(chain->desc.Width, chain->desc.Height);
+        dxgi_vk_swap_chain_queue_deferred_present(chain);
+    }
+    else
+    {
+        d3d12_command_queue_enqueue_callback(chain->queue, dxgi_vk_swap_chain_present_callback, chain);
+    }
 
     chain->user.index = (chain->user.index + 1) % chain->desc.BufferCount;
 
@@ -1106,9 +1326,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
 
     /* Relevant if application does not use latency fence, or we force a lower latency through VKD3D_SWAPCHAIN_FRAME_LATENCY overrides. */
     if (vkd3d_native_sync_handle_is_valid(chain->frame_latency_event_internal))
-        dxgi_vk_swap_chain_wait_internal_handle(chain, low_latency_enable);
+        dxgi_vk_swap_chain_wait_internal_handle(chain, low_latency_enable || vkd3d_defer_swapchain_present);
 
-    if (vkd3d_native_sync_handle_is_valid(chain->present_request_done_event))
+    if (vkd3d_native_sync_handle_is_valid(chain->present_request_done_event) && !vkd3d_defer_swapchain_present)
     {
         /* For non-present wait path where we are trying to simulate KHR_present_wait in a poor man's way.
          * Block here until we have processed the present and acquired the next image. This is equivalent
@@ -1124,6 +1344,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
             /* Remember to wait for this next present. */
             chain->outstanding_present_request = true;
         }
+    }
+    else if (vkd3d_defer_swapchain_present && vkd3d_native_sync_handle_is_valid(chain->present_request_done_event))
+    {
+        /* Non-blocking: blit runs after a later Execute. */
+        if (!vkd3d_native_sync_handle_acquire_timeout(chain->present_request_done_event, 0))
+            chain->outstanding_present_request = true;
     }
 
     /* For latency debug purposes. Consider a frame to begin when we return from Present() with the next user index set.
@@ -2077,13 +2303,17 @@ static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap
 static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *chain, VkCommandBuffer vk_cmd, uint32_t swapchain_index)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
+    struct d3d12_resource *lumion_rt = NULL;
     VkRenderingAttachmentInfo attachment_info;
     VkImageMemoryBarrier2 image_barrier;
     VkDescriptorImageInfo image_info;
     VkWriteDescriptorSet write_info;
     struct d3d12_resource *resource;
     VkRenderingInfo rendering_info;
+    VkImageView sample_view;
+    VkImageLayout sample_layout;
     VkDependencyInfo dep_info;
+    bool sample_lumion_rt = false;
     VkViewport viewport;
     bool blank_present;
 
@@ -2094,6 +2324,34 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     if (blank_present)
         WARN("Application is presenting user index %u, but it has never been rendered to.\n", chain->request.user_index);
+
+    vkd3d_lumion_set_present_size(chain->desc.Width, chain->desc.Height);
+
+    if (vkd3d_defer_swapchain_present)
+    {
+        lumion_rt = vkd3d_lumion_acquire_viewport_rt();
+        if (lumion_rt &&
+                lumion_rt->desc.Width == chain->desc.Width &&
+                lumion_rt->desc.Height == chain->desc.Height)
+        {
+            sample_lumion_rt = true;
+            blank_present = false;
+            if ((++lumion_sample_log_counter % 120) == 1)
+            {
+                INFO("Lumion: sampling offscreen viewport RT %ux%u fmt %#x\n",
+                        (unsigned int)lumion_rt->desc.Width,
+                        (unsigned int)lumion_rt->desc.Height,
+                        (unsigned int)lumion_rt->desc.Format);
+            }
+        }
+        else if ((++lumion_sample_log_counter % 120) == 1)
+        {
+            INFO("Lumion: NOT sampling offscreen viewport RT (swapchain %ux%u, tracked %ux%u)\n",
+                    chain->desc.Width, chain->desc.Height,
+                    lumion_rt ? (unsigned int)lumion_rt->desc.Width : 0u,
+                    lumion_rt ? (unsigned int)lumion_rt->desc.Height : 0u);
+        }
+    }
 
     memset(&attachment_info, 0, sizeof(attachment_info));
     attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
@@ -2163,6 +2421,67 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     }
 
     VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
+
+    sample_view = chain->user.vk_image_views[chain->request.user_index];
+    sample_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    if (sample_lumion_rt)
+    {
+        VkImageViewCreateInfo view_info;
+        VkResult vr;
+
+        if (chain->present.lumion_viewport_image != lumion_rt->res.vk_image)
+        {
+            VK_CALL(vkDestroyImageView(chain->queue->device->vk_device,
+                    chain->present.lumion_viewport_view, NULL));
+            chain->present.lumion_viewport_view = VK_NULL_HANDLE;
+            chain->present.lumion_viewport_image = VK_NULL_HANDLE;
+
+            memset(&view_info, 0, sizeof(view_info));
+            view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view_info.image = lumion_rt->res.vk_image;
+            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format = lumion_rt->format->vk_format;
+            view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            view_info.subresourceRange.levelCount = 1;
+            view_info.subresourceRange.layerCount = 1;
+            vr = VK_CALL(vkCreateImageView(chain->queue->device->vk_device, &view_info, NULL,
+                    &chain->present.lumion_viewport_view));
+            if (vr == VK_SUCCESS)
+            {
+                chain->present.lumion_viewport_image = lumion_rt->res.vk_image;
+            }
+            else
+            {
+                ERR("Lumion: failed to create viewport RT image view, vr %d.\n", vr);
+                sample_lumion_rt = false;
+            }
+        }
+
+        if (sample_lumion_rt)
+        {
+            sample_view = chain->present.lumion_viewport_view;
+            sample_layout = d3d12_resource_pick_layout(lumion_rt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            /* COLOR_ATTACHMENT -> SHADER_READ before sampling the offscreen viewport. */
+            memset(&image_barrier, 0, sizeof(image_barrier));
+            image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            image_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            image_barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            image_barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            image_barrier.oldLayout = d3d12_resource_pick_layout(lumion_rt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            image_barrier.newLayout = sample_layout;
+            image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            image_barrier.image = lumion_rt->res.vk_image;
+            image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            image_barrier.subresourceRange.levelCount = 1;
+            image_barrier.subresourceRange.layerCount = 1;
+            VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
+        }
+    }
+
     VK_CALL(vkCmdBeginRendering(vk_cmd, &rendering_info));
 
     if (!blank_present)
@@ -2182,8 +2501,8 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         write_info.dstBinding = 0;
         write_info.dstArrayElement = 0;
         write_info.descriptorCount = 1;
-        image_info.imageView = chain->user.vk_image_views[chain->request.user_index];
-        image_info.imageLayout = d3d12_resource_pick_layout(chain->user.backbuffers[chain->request.user_index], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        image_info.imageView = sample_view;
+        image_info.imageLayout = sample_layout;
         image_info.sampler = VK_NULL_HANDLE;
 
         VK_CALL(vkCmdPushDescriptorSetKHR(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2194,12 +2513,40 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     VK_CALL(vkCmdEndRendering(vk_cmd));
 
+    if (sample_lumion_rt)
+    {
+        /* Restore COLOR_ATTACHMENT so vkd3d's tracked layout stays valid. */
+        memset(&image_barrier, 0, sizeof(image_barrier));
+        image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        image_barrier.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        image_barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        image_barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+        image_barrier.oldLayout = sample_layout;
+        image_barrier.newLayout = d3d12_resource_pick_layout(lumion_rt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        image_barrier.image = lumion_rt->res.vk_image;
+        image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        image_barrier.subresourceRange.levelCount = 1;
+        image_barrier.subresourceRange.layerCount = 1;
+        VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
+    }
+
+    vkd3d_lumion_release_viewport_rt(lumion_rt);
+
     image_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     image_barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
     image_barrier.dstAccessMask = VK_ACCESS_2_NONE;
-    image_barrier.oldLayout = image_barrier.newLayout;
+    image_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     image_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.image = chain->present.vk_backbuffer_images[swapchain_index];
+    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1;
+    image_barrier.subresourceRange.layerCount = 1;
 
     VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
 

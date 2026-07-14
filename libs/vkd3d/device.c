@@ -530,6 +530,7 @@ enum vkd3d_application_feature_override
 static enum vkd3d_application_feature_override vkd3d_application_feature_override;
 uint64_t vkd3d_config_flags;
 struct vkd3d_shader_quirk_info vkd3d_shader_quirk_info;
+bool vkd3d_defer_swapchain_present;
 
 struct vkd3d_instance_application_meta
 {
@@ -662,6 +663,8 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     { VKD3D_STRING_COMPARE_EXACT, "ACValhalla.exe", VKD3D_CONFIG_FLAG_DEFER_RESOURCE_DESTRUCTION, 0 },
     /* Guardians of the Galaxy: Tries to use root descriptors with indirect rendering if it detects an Nvidia GPU. */
     { VKD3D_STRING_COMPARE_EXACT, "gotg.exe", VKD3D_CONFIG_FLAG_FORCE_RAW_VA_CBV, 0 },
+    /* Lumion 2026: Present runs before Execute fills the viewport; defer blit (bit-block transfer) and sample offscreen HDR RT. */
+    { VKD3D_STRING_COMPARE_EXACT, "Lumion.exe", 0, 0 },
     { VKD3D_STRING_COMPARE_NEVER, NULL, 0, 0 }
 };
 
@@ -996,6 +999,21 @@ static void vkd3d_instance_apply_application_workarounds(void)
             INFO("Detected game %s, adding config 0x%"PRIx64", removing masks 0x%"PRIx64".\n",
                  app, application_override[i].global_flags_add, application_override[i].global_flags_remove);
             vkd3d_application_feature_override = application_override[i].override;
+
+            if (!strcmp(application_override[i].name, "Lumion.exe"))
+            {
+                char env[64];
+                if (!vkd3d_get_env_var("VKD3D_LUMION_DEFER", env, sizeof(env)) || strcmp(env, "0") != 0)
+                {
+                    vkd3d_defer_swapchain_present = true;
+                    INFO("Lumion: enabling deferred swapchain present "
+                            "(set VKD3D_LUMION_DEFER=0 to disable).\n");
+                }
+                else
+                {
+                    INFO("Lumion: deferred swapchain present disabled via VKD3D_LUMION_DEFER=0.\n");
+                }
+            }
             break;
         }
     }

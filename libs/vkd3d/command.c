@@ -8526,6 +8526,20 @@ static bool d3d12_command_list_emit_predicated_command(struct d3d12_command_list
     return true;
 }
 
+static void d3d12_command_list_lumion_note_bound_rts(struct d3d12_command_list *list)
+{
+    unsigned int i;
+
+    if (!vkd3d_defer_swapchain_present)
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(list->rtvs); i++)
+    {
+        if (list->rtvs[i].resource)
+            vkd3d_lumion_note_viewport_rt(list->rtvs[i].resource);
+    }
+}
+
 static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_list_iface *iface,
         UINT vertex_count_per_instance, UINT instance_count, UINT start_vertex_location,
         UINT start_instance_location)
@@ -8556,6 +8570,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
         WARN("Failed to begin render pass, ignoring draw call.\n");
         return;
     }
+
+    d3d12_command_list_lumion_note_bound_rts(list);
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
@@ -8643,6 +8659,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
         WARN("Failed to begin render pass, ignoring draw call.\n");
         return;
     }
+
+    d3d12_command_list_lumion_note_bound_rts(list);
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
@@ -8836,6 +8854,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
         WARN("Failed to update compute state, ignoring dispatch.\n");
         return;
     }
+
+    d3d12_command_list_lumion_note_bound_rts(list);
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
@@ -18864,6 +18884,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchMesh(d3d12_command_list
         return;
     }
 
+    d3d12_command_list_lumion_note_bound_rts(list);
+
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
     if (!list->predication.fallback_enabled)
@@ -20753,6 +20775,9 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
 #endif
     sub.execute.timeline_cookie = timeline_cookie;
     d3d12_command_queue_add_submission(command_queue, &sub);
+
+    /* Lumion: Present is deferred until after Execute fills the offscreen viewport. */
+    dxgi_vk_swap_chain_flush_deferred_present(command_queue);
 }
 
 static void STDMETHODCALLTYPE d3d12_command_queue_SetMarker(ID3D12CommandQueue *iface,
