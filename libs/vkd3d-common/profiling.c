@@ -145,7 +145,7 @@ static void (*pfn_tracy_emit_zone_end)( TracyCZoneCtx ctx );
 static void vkd3d_init_profiling_once(void)
 {
 #if defined(_WIN32)
-#define SONAME_TRACY "tracy.dll"
+#define SONAME_TRACY "TracyClient.dll"
 #else
 #error "Unrecognized platform."
 #endif
