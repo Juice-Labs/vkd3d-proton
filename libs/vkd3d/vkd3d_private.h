@@ -5443,6 +5443,7 @@ struct vkd3d_pending_image_descriptor_manager
     uint64_t next_generation;
     size_t high_water_mark;
     uint64_t stale_response_count;
+    uint32_t has_work;
 };
 
 struct d3d12_device

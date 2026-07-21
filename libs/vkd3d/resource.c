@@ -4723,7 +4723,6 @@ HRESULT vkd3d_pending_image_descriptors_init(struct d3d12_device *device)
         pthread_mutex_destroy(&manager->mutex);
         return hresult_from_errno(rc);
     }
-
     manager->next_generation = 1;
     return S_OK;
 }
@@ -4772,6 +4771,9 @@ void vkd3d_pending_image_descriptor_invalidate(struct d3d12_device *device,
         }
     }
 
+    vkd3d_atomic_uint32_store_explicit(&manager->has_work,
+            !!manager->descriptor_count,
+            vkd3d_memory_order_release);
     pthread_mutex_unlock(&manager->mutex);
     if (view)
         vkd3d_view_decref(view, device);
@@ -4842,6 +4844,8 @@ bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
     descriptor->descriptor_size = descriptor_size;
     descriptor->generation = slot->generation = manager->next_generation++;
 
+    vkd3d_atomic_uint32_store_explicit(
+            &manager->has_work, 1, vkd3d_memory_order_release);
     pthread_mutex_unlock(&manager->mutex);
     if (old_view)
         vkd3d_view_decref(old_view, device);
@@ -4959,6 +4963,9 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
     {
         const vkd3d_cpu_descriptor_va_t current_dst_va = dst_va + i * descriptor_increment;
 
+        if (current_dst_va == src_va + i * descriptor_increment)
+            continue;
+
         descriptor = vkd3d_pending_image_descriptor_find_locked(
                 manager, current_dst_va, &descriptor_index);
         if (descriptor)
@@ -4988,6 +4995,9 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
     }
 
     manager->high_water_mark = max(manager->high_water_mark, manager->descriptor_count);
+    vkd3d_atomic_uint32_store_explicit(&manager->has_work,
+            !!manager->descriptor_count,
+            vkd3d_memory_order_release);
     pthread_mutex_unlock(&manager->mutex);
 
     for (i = 0; i < descriptor_count; ++i)
@@ -5049,12 +5059,18 @@ bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
     VKD3D_REGION_DECL(pending_image_descriptor_flush_heap_teardown);
     VKD3D_REGION_DECL(pending_image_descriptor_flush_device_teardown);
 
+    if (!vkd3d_atomic_uint32_load_explicit(
+            &manager->has_work, vkd3d_memory_order_acquire))
+        return true;
+
     VKD3D_REGION_BEGIN(pending_image_descriptor_materialize);
     pthread_mutex_lock(&manager->flush_mutex);
     pthread_mutex_lock(&manager->mutex);
 
     if (!manager->descriptor_count)
     {
+        vkd3d_atomic_uint32_store_explicit(
+                &manager->has_work, 0, vkd3d_memory_order_release);
         pthread_mutex_unlock(&manager->mutex);
         pthread_mutex_unlock(&manager->flush_mutex);
         VKD3D_REGION_END(pending_image_descriptor_materialize);
@@ -5192,13 +5208,19 @@ bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
         begin += chunk_count;
     }
 
+    TRACE("Pending image descriptor stale responses: %"PRIu64".\n",
+            manager->stale_response_count);
+
+    pthread_mutex_lock(&manager->mutex);
+    vkd3d_atomic_uint32_store_explicit(
+            &manager->has_work, !!manager->descriptor_count, vkd3d_memory_order_release);
+    pthread_mutex_unlock(&manager->mutex);
+
     for (begin = 0; begin < descriptor_count; ++begin)
         if (descriptors[begin].view)
             vkd3d_view_decref(descriptors[begin].view, device);
     vkd3d_free(descriptors);
 
-    TRACE("Pending image descriptor stale responses: %"PRIu64".\n",
-            manager->stale_response_count);
     pthread_mutex_unlock(&manager->flush_mutex);
 
     switch (reason)
@@ -5242,6 +5264,8 @@ void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device)
     manager->descriptor_count = 0;
     manager->slots = NULL;
     manager->slot_count = 0;
+    vkd3d_atomic_uint32_store_explicit(
+            &manager->has_work, 0, vkd3d_memory_order_release);
     pthread_mutex_destroy(&manager->flush_mutex);
     pthread_mutex_destroy(&manager->mutex);
 }
