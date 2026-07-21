@@ -4315,6 +4315,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     size_t i, j;
 
     d3d_destruction_notifier_free(&device->destruction_notifier);
+    vkd3d_pending_image_descriptors_cleanup(device);
 
     if (device->internal_sparse_queue)
         d3d12_device_unmap_vkd3d_queue(device->internal_sparse_queue, NULL);
@@ -5953,6 +5954,81 @@ static inline D3D12_CPU_DESCRIPTOR_HANDLE d3d12_advance_cpu_descriptor_handle(D3
     return handle;
 }
 
+static void d3d12_device_begin_copy_pending_image_descriptor_range(struct d3d12_device *device,
+        D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
+        UINT descriptor_count)
+{
+    const unsigned int increment = d3d12_device_get_descriptor_handle_increment_size(
+            device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    vkd3d_pending_image_descriptors_copy_lock(device);
+    if (!vkd3d_pending_image_descriptors_copy_locked(
+            device, dst.ptr, src.ptr, descriptor_count, increment))
+    {
+        vkd3d_pending_image_descriptors_copy_unlock(device);
+        vkd3d_pending_image_descriptors_flush(
+                device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS);
+        vkd3d_pending_image_descriptors_copy_lock(device);
+    }
+}
+
+static void d3d12_device_begin_copy_pending_image_descriptor_ranges(struct d3d12_device *device,
+        UINT dst_descriptor_range_count, const D3D12_CPU_DESCRIPTOR_HANDLE *dst_descriptor_range_offsets,
+        const UINT *dst_descriptor_range_sizes,
+        UINT src_descriptor_range_count, const D3D12_CPU_DESCRIPTOR_HANDLE *src_descriptor_range_offsets,
+        const UINT *src_descriptor_range_sizes)
+{
+    const unsigned int increment = d3d12_device_get_descriptor_handle_increment_size(
+            device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    unsigned int dst_range_idx = 0;
+    unsigned int src_range_idx = 0;
+    unsigned int dst_idx = 0;
+    unsigned int src_idx = 0;
+
+    vkd3d_pending_image_descriptors_copy_lock(device);
+    while (dst_range_idx < dst_descriptor_range_count && src_range_idx < src_descriptor_range_count)
+    {
+        const unsigned int dst_range_size = dst_descriptor_range_sizes ?
+                dst_descriptor_range_sizes[dst_range_idx] : 1;
+        const unsigned int src_range_size = src_descriptor_range_sizes ?
+                src_descriptor_range_sizes[src_range_idx] : 1;
+        const unsigned int copy_count = min(
+                dst_range_size - dst_idx, src_range_size - src_idx);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dst = d3d12_advance_cpu_descriptor_handle(
+                dst_descriptor_range_offsets[dst_range_idx], increment, dst_idx);
+        const D3D12_CPU_DESCRIPTOR_HANDLE src = d3d12_advance_cpu_descriptor_handle(
+                src_descriptor_range_offsets[src_range_idx], increment, src_idx);
+
+        if (!vkd3d_pending_image_descriptors_copy_locked(
+                device, dst.ptr, src.ptr, copy_count, increment))
+        {
+            vkd3d_pending_image_descriptors_copy_unlock(device);
+            vkd3d_pending_image_descriptors_flush(
+                    device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS);
+            vkd3d_pending_image_descriptors_copy_lock(device);
+            return;
+        }
+
+        dst_idx += copy_count;
+        src_idx += copy_count;
+        if (dst_idx >= dst_range_size)
+        {
+            ++dst_range_idx;
+            dst_idx = 0;
+        }
+        if (src_idx >= src_range_size)
+        {
+            ++src_range_idx;
+            src_idx = 0;
+        }
+    }
+}
+
+static void d3d12_device_end_copy_pending_image_descriptors(struct d3d12_device *device)
+{
+    vkd3d_pending_image_descriptors_copy_unlock(device);
+}
+
 static inline void d3d12_device_copy_descriptors_cbv_srv_uav_sampler(struct d3d12_device *device,
         D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
         D3D12_DESCRIPTOR_HEAP_TYPE heap_type,
@@ -6074,12 +6150,20 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptors(d3d12_device_iface *i
             dst_descriptor_range_sizes, src_descriptor_range_count, src_descriptor_range_offsets,
             src_descriptor_range_sizes, descriptor_heap_type);
 
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_ranges(impl_from_ID3D12Device(iface),
+                dst_descriptor_range_count, dst_descriptor_range_offsets, dst_descriptor_range_sizes,
+                src_descriptor_range_count, src_descriptor_range_offsets, src_descriptor_range_sizes);
+
     d3d12_device_copy_descriptors(impl_from_ID3D12Device(iface),
             dst_descriptor_range_count, dst_descriptor_range_offsets,
             dst_descriptor_range_sizes,
             src_descriptor_range_count, src_descriptor_range_offsets,
             src_descriptor_range_sizes,
             descriptor_heap_type);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(impl_from_ID3D12Device(iface));
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buffer_16_16_4(d3d12_device_iface *iface,
@@ -6099,6 +6183,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
           "src_descriptor_range_offset %#lx, descriptor_heap_type %#x.\n",
             iface, descriptor_count, dst_descriptor_range_offset.ptr, src_descriptor_range_offset.ptr,
             descriptor_heap_type);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(unsafe_impl_from_ID3D12Device(iface),
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
             descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER))
@@ -6185,6 +6273,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(unsafe_impl_from_ID3D12Device(iface));
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buffer_64_64_32(d3d12_device_iface *iface,
@@ -6203,6 +6294,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
           "src_descriptor_range_offset %#lx, descriptor_heap_type %#x.\n",
             iface, descriptor_count, dst_descriptor_range_offset.ptr, src_descriptor_range_offset.ptr,
             descriptor_heap_type);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(unsafe_impl_from_ID3D12Device(iface),
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
             descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER))
@@ -6289,6 +6384,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(unsafe_impl_from_ID3D12Device(iface));
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_64_16_packed(d3d12_device_iface *iface,
@@ -6301,6 +6399,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_64_16_
           "src_descriptor_range_offset %#lx, descriptor_heap_type %#x.\n",
             iface, descriptor_count, dst_descriptor_range_offset.ptr, src_descriptor_range_offset.ptr,
             descriptor_heap_type);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(unsafe_impl_from_ID3D12Device(iface),
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
     {
@@ -6382,6 +6484,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_64_16_
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(unsafe_impl_from_ID3D12Device(iface));
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_32_16_planar(d3d12_device_iface *iface,
@@ -6394,6 +6499,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_32_16_
           "src_descriptor_range_offset %#lx, descriptor_heap_type %#x.\n",
             iface, descriptor_count, dst_descriptor_range_offset.ptr, src_descriptor_range_offset.ptr,
             descriptor_heap_type);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(unsafe_impl_from_ID3D12Device(iface),
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
     {
@@ -6439,6 +6548,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_32_16_
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(unsafe_impl_from_ID3D12Device(iface));
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_generic(d3d12_device_iface *iface,
@@ -6453,6 +6565,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_generi
             descriptor_heap_type);
 
     device = unsafe_impl_from_ID3D12Device(iface);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(device,
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
     {
@@ -6475,6 +6591,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_generi
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(device);
 }
 
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_default(d3d12_device_iface *iface,
@@ -6489,6 +6608,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_default(d3d12_d
             descriptor_heap_type);
 
     device = unsafe_impl_from_ID3D12Device(iface);
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_begin_copy_pending_image_descriptor_range(device,
+                dst_descriptor_range_offset, src_descriptor_range_offset, descriptor_count);
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
             descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER))
@@ -6506,6 +6629,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_default(d3d12_d
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        d3d12_device_end_copy_pending_image_descriptors(device);
 }
 
 static D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE d3d12_device_GetResourceAllocationInfo1(d3d12_device_iface *iface,
@@ -10118,6 +10244,9 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
         goto out_free_mutex;
     }
 
+    if (FAILED(hr = vkd3d_pending_image_descriptors_init(device)))
+        goto out_free_global_submission_mutex;
+
     spinlock_init(&device->low_latency_swapchain_spinlock);
 
     device->ID3D12DeviceExt_iface.lpVtbl = &d3d12_device_vkd3d_ext_vtbl;
@@ -10128,7 +10257,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     if ((rc = rwlock_init(&device->vertex_input_lock)))
     {
         hr = hresult_from_errno(rc);
-        goto out_free_global_submission_mutex;
+        goto out_cleanup_pending_image_descriptors;
     }
 
     if ((rc = rwlock_init(&device->fragment_output_lock)))
@@ -10287,6 +10416,8 @@ out_free_fragment_output_lock:
     rwlock_destroy(&device->fragment_output_lock);
 out_free_vertex_input_lock:
     rwlock_destroy(&device->vertex_input_lock);
+out_cleanup_pending_image_descriptors:
+    vkd3d_pending_image_descriptors_cleanup(device);
 out_free_global_submission_mutex:
     pthread_mutex_destroy(&device->global_submission_mutex);
 out_free_mutex:

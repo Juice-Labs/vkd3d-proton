@@ -7386,6 +7386,9 @@ static void vkd3d_bindless_state_init_null_descriptor_payloads(struct vkd3d_bind
     VkDescriptorGetInfoEXT get_info;
     uint8_t *payload;
     uint32_t i;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_null_uniform_texel_embedded);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_null_descriptor_template);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_null_storage_buffer_embedded);
 
     bindless_state->descriptor_buffer_cbv_srv_uav_size = 0;
 
@@ -7410,15 +7413,19 @@ static void vkd3d_bindless_state_init_null_descriptor_payloads(struct vkd3d_bind
                 types[i].vk_descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
         {
             get_info.type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_null_uniform_texel_embedded);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustUniformTexelBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_null_uniform_texel_embedded);
             payload += bindless_state->descriptor_buffer_packed_raw_buffer_offset;
         }
 
         get_info.type = types[i].vk_descriptor_type;
 
+        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_null_descriptor_template);
         VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info, types[i].size, payload));
+        VKD3D_REGION_END(vkGetDescriptorEXT_null_descriptor_template);
 
         if (bindless_state->flags & VKD3D_BINDLESS_MUTABLE_EMBEDDED)
         {
@@ -7442,9 +7449,11 @@ static void vkd3d_bindless_state_init_null_descriptor_payloads(struct vkd3d_bind
                  * since SSBO is ambiguous (we don't know UAV vs SRV necessarily). */
                 payload += bindless_state->descriptor_buffer_packed_raw_buffer_offset;
                 get_info.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                VKD3D_REGION_BEGIN(vkGetDescriptorEXT_null_storage_buffer_embedded);
                 VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                         device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                         payload));
+                VKD3D_REGION_END(vkGetDescriptorEXT_null_storage_buffer_embedded);
             }
         }
 

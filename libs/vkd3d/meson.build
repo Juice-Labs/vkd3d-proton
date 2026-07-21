@@ -114,7 +114,7 @@ if vkd3d_platform == 'windows'
   vkd3d_src += ['shared_metadata.c']
 endif
 
-if enable_profiling
+if enable_profiling or enable_tracy
   vkd3d_src += ['timestamp_profiler.c']
 endif
 

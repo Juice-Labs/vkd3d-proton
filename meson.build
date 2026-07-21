@@ -202,7 +202,11 @@ if enable_tracy
   endif
 
   tracy = subproject('tracy', default_options : tracy_options)
-  tracy_dep = tracy.get_variable('tracy_dep')
+  if dynamic_tracy
+    tracy_dep = tracy.get_variable('tracy_dep_dynamic')
+  else
+    tracy_dep = tracy.get_variable('tracy_dep')
+  endif
 endif
 
 subdir('include')

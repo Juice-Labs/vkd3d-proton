@@ -1275,6 +1275,15 @@ enum vkd3d_view_type
     VKD3D_VIEW_TYPE_ACCELERATION_STRUCTURE_OR_OPACITY_MICROMAP
 };
 
+enum vkd3d_pending_image_descriptor_flush_reason
+{
+    VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS,
+    VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS,
+    VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT,
+    VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN,
+    VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN,
+};
+
 struct vkd3d_view
 {
     LONG refcount;
@@ -1433,6 +1442,21 @@ STATIC_ASSERT(sizeof(struct vkd3d_descriptor_metadata_view) == 16);
 #endif
 
 typedef uintptr_t vkd3d_cpu_descriptor_va_t;
+
+HRESULT vkd3d_pending_image_descriptors_init(struct d3d12_device *device);
+void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device);
+void vkd3d_pending_image_descriptor_invalidate(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t descriptor_va);
+bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t descriptor_va, void *payload, struct vkd3d_view *view,
+        VkDescriptorType descriptor_type, VkImageLayout image_layout, size_t descriptor_size);
+void vkd3d_pending_image_descriptors_copy_lock(struct d3d12_device *device);
+void vkd3d_pending_image_descriptors_copy_unlock(struct d3d12_device *device);
+bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
+        unsigned int descriptor_count, unsigned int descriptor_increment);
+bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
+        enum vkd3d_pending_image_descriptor_flush_reason reason);
 
 void d3d12_desc_copy(vkd3d_cpu_descriptor_va_t dst, vkd3d_cpu_descriptor_va_t src,
         unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device);
@@ -5389,6 +5413,38 @@ struct vkd3d_null_rtas_allocation
     spinlock_t lock;
 };
 
+struct vkd3d_pending_image_descriptor
+{
+    vkd3d_cpu_descriptor_va_t descriptor_va;
+    void *payload;
+    struct vkd3d_view *view;
+    VkDescriptorType descriptor_type;
+    VkImageLayout image_layout;
+    size_t descriptor_size;
+    uint64_t generation;
+};
+
+struct vkd3d_pending_image_descriptor_slot
+{
+    vkd3d_cpu_descriptor_va_t descriptor_va;
+    uint64_t generation;
+};
+
+struct vkd3d_pending_image_descriptor_manager
+{
+    pthread_mutex_t mutex;
+    pthread_mutex_t flush_mutex;
+    struct vkd3d_pending_image_descriptor *descriptors;
+    size_t descriptor_count;
+    size_t descriptor_capacity;
+    struct vkd3d_pending_image_descriptor_slot *slots;
+    size_t slot_count;
+    size_t slot_capacity;
+    uint64_t next_generation;
+    size_t high_water_mark;
+    uint64_t stale_response_count;
+};
+
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
@@ -5406,6 +5462,7 @@ struct d3d12_device
     pthread_mutex_t mutex;
     pthread_mutex_t global_submission_mutex;
     spinlock_t low_latency_swapchain_spinlock;
+    struct vkd3d_pending_image_descriptor_manager pending_image_descriptors;
 
     VkPhysicalDeviceMemoryProperties memory_properties;
 

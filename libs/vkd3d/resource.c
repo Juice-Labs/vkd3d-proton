@@ -4710,6 +4710,542 @@ void vkd3d_view_decref(struct vkd3d_view *view, struct d3d12_device *device)
         vkd3d_view_destroy(view, device);
 }
 
+HRESULT vkd3d_pending_image_descriptors_init(struct d3d12_device *device)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    int rc;
+
+    memset(manager, 0, sizeof(*manager));
+    if ((rc = pthread_mutex_init(&manager->mutex, NULL)))
+        return hresult_from_errno(rc);
+    if ((rc = pthread_mutex_init(&manager->flush_mutex, NULL)))
+    {
+        pthread_mutex_destroy(&manager->mutex);
+        return hresult_from_errno(rc);
+    }
+
+    manager->next_generation = 1;
+    return S_OK;
+}
+
+static struct vkd3d_pending_image_descriptor_slot *vkd3d_pending_image_descriptor_get_slot_locked(
+        struct vkd3d_pending_image_descriptor_manager *manager,
+        vkd3d_cpu_descriptor_va_t descriptor_va, bool create)
+{
+    size_t i;
+
+    for (i = 0; i < manager->slot_count; ++i)
+        if (manager->slots[i].descriptor_va == descriptor_va)
+            return &manager->slots[i];
+
+    if (!create || !vkd3d_array_reserve((void **)&manager->slots,
+            &manager->slot_capacity, manager->slot_count + 1, sizeof(*manager->slots)))
+        return NULL;
+
+    manager->slots[manager->slot_count].descriptor_va = descriptor_va;
+    manager->slots[manager->slot_count].generation = 0;
+    return &manager->slots[manager->slot_count++];
+}
+
+void vkd3d_pending_image_descriptor_invalidate(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t descriptor_va)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    struct vkd3d_pending_image_descriptor_slot *slot;
+    struct vkd3d_view *view = NULL;
+    VKD3D_REGION_DECL(pending_image_descriptor_invalidate);
+    size_t i;
+
+    VKD3D_REGION_BEGIN(pending_image_descriptor_invalidate);
+    pthread_mutex_lock(&manager->mutex);
+
+    if ((slot = vkd3d_pending_image_descriptor_get_slot_locked(manager, descriptor_va, false)))
+        slot->generation = manager->next_generation++;
+
+    for (i = 0; i < manager->descriptor_count; ++i)
+    {
+        if (manager->descriptors[i].descriptor_va == descriptor_va)
+        {
+            view = manager->descriptors[i].view;
+            manager->descriptors[i] = manager->descriptors[--manager->descriptor_count];
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&manager->mutex);
+    if (view)
+        vkd3d_view_decref(view, device);
+    VKD3D_REGION_END(pending_image_descriptor_invalidate);
+}
+
+bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t descriptor_va, void *payload, struct vkd3d_view *view,
+        VkDescriptorType descriptor_type, VkImageLayout image_layout, size_t descriptor_size)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    struct vkd3d_pending_image_descriptor_slot *slot;
+    struct vkd3d_pending_image_descriptor *descriptor;
+    struct vkd3d_view *old_view = NULL;
+    VKD3D_REGION_DECL(pending_image_descriptor_enqueue);
+    size_t i;
+
+    if (!payload || !descriptor_size || descriptor_size > VKD3D_MAX_DESCRIPTOR_SIZE)
+        return false;
+
+    if (view)
+        vkd3d_view_incref(view);
+
+    VKD3D_REGION_BEGIN(pending_image_descriptor_enqueue);
+    pthread_mutex_lock(&manager->mutex);
+
+    if (!(slot = vkd3d_pending_image_descriptor_get_slot_locked(manager, descriptor_va, true)))
+    {
+        pthread_mutex_unlock(&manager->mutex);
+        if (view)
+            vkd3d_view_decref(view, device);
+        VKD3D_REGION_END(pending_image_descriptor_enqueue);
+        return false;
+    }
+
+    descriptor = NULL;
+    for (i = 0; i < manager->descriptor_count; ++i)
+    {
+        if (manager->descriptors[i].descriptor_va == descriptor_va)
+        {
+            descriptor = &manager->descriptors[i];
+            old_view = descriptor->view;
+            break;
+        }
+    }
+
+    if (!descriptor)
+    {
+        if (!vkd3d_array_reserve((void **)&manager->descriptors,
+                &manager->descriptor_capacity, manager->descriptor_count + 1,
+                sizeof(*manager->descriptors)))
+        {
+            pthread_mutex_unlock(&manager->mutex);
+            if (view)
+                vkd3d_view_decref(view, device);
+            VKD3D_REGION_END(pending_image_descriptor_enqueue);
+            return false;
+        }
+        descriptor = &manager->descriptors[manager->descriptor_count++];
+        manager->high_water_mark = max(manager->high_water_mark, manager->descriptor_count);
+    }
+
+    descriptor->descriptor_va = descriptor_va;
+    descriptor->payload = payload;
+    descriptor->view = view;
+    descriptor->descriptor_type = descriptor_type;
+    descriptor->image_layout = image_layout;
+    descriptor->descriptor_size = descriptor_size;
+    descriptor->generation = slot->generation = manager->next_generation++;
+
+    pthread_mutex_unlock(&manager->mutex);
+    if (old_view)
+        vkd3d_view_decref(old_view, device);
+    VKD3D_REGION_END(pending_image_descriptor_enqueue);
+    return true;
+}
+
+struct vkd3d_pending_image_descriptor_copy
+{
+    struct vkd3d_pending_image_descriptor descriptor;
+    struct vkd3d_view *old_view;
+    bool pending;
+};
+
+static struct vkd3d_pending_image_descriptor *vkd3d_pending_image_descriptor_find_locked(
+        struct vkd3d_pending_image_descriptor_manager *manager,
+        vkd3d_cpu_descriptor_va_t descriptor_va, size_t *descriptor_index)
+{
+    size_t i;
+
+    for (i = 0; i < manager->descriptor_count; ++i)
+    {
+        if (manager->descriptors[i].descriptor_va == descriptor_va)
+        {
+            if (descriptor_index)
+                *descriptor_index = i;
+            return &manager->descriptors[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void *vkd3d_pending_image_descriptor_copy_payload(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va)
+{
+    struct d3d12_desc_split dst;
+    struct d3d12_desc_split src;
+
+    if (d3d12_device_use_embedded_mutable_descriptors(device))
+        return d3d12_desc_decode_embedded_resource_va(dst_va).payload;
+
+    dst = d3d12_desc_decode_va(dst_va);
+    src = d3d12_desc_decode_va(src_va);
+    return d3d12_descriptor_heap_get_mapped_payload(
+            dst.heap, src.types->single_binding.set, dst.offset);
+}
+
+void vkd3d_pending_image_descriptors_copy_lock(struct d3d12_device *device)
+{
+    pthread_mutex_lock(&device->pending_image_descriptors.flush_mutex);
+}
+
+void vkd3d_pending_image_descriptors_copy_unlock(struct d3d12_device *device)
+{
+    pthread_mutex_unlock(&device->pending_image_descriptors.flush_mutex);
+}
+
+bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
+        unsigned int descriptor_count, unsigned int descriptor_increment)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    struct vkd3d_pending_image_descriptor_copy *copies;
+    struct vkd3d_pending_image_descriptor *descriptor;
+    struct vkd3d_pending_image_descriptor_slot *slot;
+    size_t descriptor_index;
+    size_t i;
+
+    if (!descriptor_count)
+        return true;
+
+    pthread_mutex_lock(&manager->mutex);
+
+    if (!manager->descriptor_count)
+    {
+        pthread_mutex_unlock(&manager->mutex);
+        return true;
+    }
+
+    if (!(copies = vkd3d_calloc(descriptor_count, sizeof(*copies))) ||
+            (size_t)descriptor_count > SIZE_MAX - manager->descriptor_count ||
+            !vkd3d_array_reserve((void **)&manager->descriptors,
+                    &manager->descriptor_capacity, manager->descriptor_count + descriptor_count,
+                    sizeof(*manager->descriptors)) ||
+            (size_t)descriptor_count > SIZE_MAX - manager->slot_count ||
+            !vkd3d_array_reserve((void **)&manager->slots,
+                    &manager->slot_capacity, manager->slot_count + descriptor_count,
+                    sizeof(*manager->slots)))
+    {
+        vkd3d_free(copies);
+        pthread_mutex_unlock(&manager->mutex);
+        return false;
+    }
+
+    /* Snapshot all sources before changing destinations so overlapping copies
+     * retain the same semantics as the descriptor payload copy. */
+    for (i = 0; i < descriptor_count; ++i)
+    {
+        const vkd3d_cpu_descriptor_va_t current_src_va = src_va + i * descriptor_increment;
+        const vkd3d_cpu_descriptor_va_t current_dst_va = dst_va + i * descriptor_increment;
+
+        if ((descriptor = vkd3d_pending_image_descriptor_find_locked(
+                manager, current_src_va, NULL)))
+        {
+            copies[i].descriptor = *descriptor;
+            copies[i].descriptor.descriptor_va = current_dst_va;
+            copies[i].descriptor.payload = vkd3d_pending_image_descriptor_copy_payload(
+                    device, current_dst_va, current_src_va);
+            copies[i].pending = true;
+        }
+    }
+
+    for (i = 0; i < descriptor_count; ++i)
+    {
+        const vkd3d_cpu_descriptor_va_t current_dst_va = dst_va + i * descriptor_increment;
+
+        descriptor = vkd3d_pending_image_descriptor_find_locked(
+                manager, current_dst_va, &descriptor_index);
+        if (descriptor)
+            copies[i].old_view = descriptor->view;
+
+        slot = vkd3d_pending_image_descriptor_get_slot_locked(
+                manager, current_dst_va, true);
+        assert(slot);
+        slot->generation = manager->next_generation++;
+
+        if (copies[i].pending)
+        {
+            if (copies[i].descriptor.view)
+                vkd3d_view_incref(copies[i].descriptor.view);
+            copies[i].descriptor.generation = slot->generation;
+
+            if (descriptor)
+                *descriptor = copies[i].descriptor;
+            else
+                manager->descriptors[manager->descriptor_count++] = copies[i].descriptor;
+        }
+        else if (descriptor)
+        {
+            manager->descriptors[descriptor_index] =
+                    manager->descriptors[--manager->descriptor_count];
+        }
+    }
+
+    manager->high_water_mark = max(manager->high_water_mark, manager->descriptor_count);
+    pthread_mutex_unlock(&manager->mutex);
+
+    for (i = 0; i < descriptor_count; ++i)
+        if (copies[i].old_view)
+            vkd3d_view_decref(copies[i].old_view, device);
+    vkd3d_free(copies);
+    return true;
+}
+
+static void vkd3d_materialize_image_descriptors_fallback(struct d3d12_device *device,
+        struct vkd3d_pending_image_descriptor *descriptors, size_t descriptor_count,
+        uint8_t *payload)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VKD3D_REGION_DECL(pending_image_descriptor_fallback);
+    size_t payload_offset = 0;
+    size_t i;
+
+    VKD3D_REGION_BEGIN(pending_image_descriptor_fallback);
+    for (i = 0; i < descriptor_count; ++i)
+    {
+        const struct vkd3d_pending_image_descriptor *descriptor = &descriptors[i];
+        VkDescriptorImageInfo image_info;
+        VkDescriptorGetInfoEXT get_info;
+
+        memset(&image_info, 0, sizeof(image_info));
+        image_info.imageView = descriptor->view ? descriptor->view->vk_image_view : VK_NULL_HANDLE;
+        image_info.imageLayout = descriptor->image_layout;
+
+        memset(&get_info, 0, sizeof(get_info));
+        get_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
+        get_info.type = descriptor->descriptor_type;
+        if (descriptor->descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+            get_info.data.pSampledImage = &image_info;
+        else
+            get_info.data.pStorageImage = &image_info;
+
+        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
+                descriptor->descriptor_size, payload + payload_offset));
+        payload_offset += descriptor->descriptor_size;
+    }
+    VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_fallback, descriptor_count);
+}
+
+bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
+        enum vkd3d_pending_image_descriptor_flush_reason reason)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    struct vkd3d_pending_image_descriptor *descriptors;
+    size_t descriptor_count;
+    size_t begin;
+    size_t chunk_index = 0;
+    VKD3D_REGION_DECL(pending_image_descriptor_materialize);
+    VKD3D_REGION_DECL(pending_image_descriptor_batch_rpc);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_copy);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_execute);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_pre_submit);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_heap_teardown);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_device_teardown);
+
+    VKD3D_REGION_BEGIN(pending_image_descriptor_materialize);
+    pthread_mutex_lock(&manager->flush_mutex);
+    pthread_mutex_lock(&manager->mutex);
+
+    if (!manager->descriptor_count)
+    {
+        pthread_mutex_unlock(&manager->mutex);
+        pthread_mutex_unlock(&manager->flush_mutex);
+        VKD3D_REGION_END(pending_image_descriptor_materialize);
+        return true;
+    }
+
+    descriptors = manager->descriptors;
+    descriptor_count = manager->descriptor_count;
+    manager->descriptors = NULL;
+    manager->descriptor_count = 0;
+    manager->descriptor_capacity = 0;
+    pthread_mutex_unlock(&manager->mutex);
+
+    TRACE("Materializing %zu pending image descriptors, reason %u, high-water %zu.\n",
+            descriptor_count, reason, manager->high_water_mark);
+
+    switch (reason)
+    {
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_copy);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_execute);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_pre_submit);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_heap_teardown);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_device_teardown);
+            break;
+    }
+
+    for (begin = 0; begin < descriptor_count;)
+    {
+        const size_t max_count = 16384;
+        const size_t max_bytes = 16 * 1024 * 1024;
+        VkImageDescriptorGetJUICE *requests;
+        uint8_t *temporary_payload;
+        size_t chunk_count = 0;
+        size_t chunk_bytes = 0;
+        size_t payload_offset = 0;
+        VkResult vr = VK_ERROR_OUT_OF_HOST_MEMORY;
+        size_t i;
+
+        while (begin + chunk_count < descriptor_count && chunk_count < max_count)
+        {
+            const size_t descriptor_size = descriptors[begin + chunk_count].descriptor_size;
+            if (chunk_count && chunk_bytes > max_bytes - descriptor_size)
+                break;
+            chunk_bytes += descriptor_size;
+            ++chunk_count;
+        }
+
+        requests = vkd3d_malloc(chunk_count * sizeof(*requests));
+        temporary_payload = vkd3d_malloc(chunk_bytes);
+        TRACE("Image descriptor batch chunk %zu: %zu items, %zu bytes.\n",
+                chunk_index++, chunk_count, chunk_bytes);
+        if (requests && temporary_payload)
+        {
+            for (i = 0; i < chunk_count; ++i)
+            {
+                const struct vkd3d_pending_image_descriptor *descriptor = &descriptors[begin + i];
+                requests[i].imageView = descriptor->view ? descriptor->view->vk_image_view : VK_NULL_HANDLE;
+                requests[i].descriptorType = descriptor->descriptor_type;
+                requests[i].imageLayout = descriptor->image_layout;
+                requests[i].dataSize = descriptor->descriptor_size;
+                requests[i].pDescriptor = temporary_payload + payload_offset;
+                payload_offset += descriptor->descriptor_size;
+            }
+
+            VKD3D_REGION_BEGIN(pending_image_descriptor_batch_rpc);
+            vr = VK_CALL(vkGetImageDescriptorsJUICE(device->vk_device,
+                    (uint32_t)chunk_count, requests));
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_batch_rpc, chunk_count);
+        }
+
+        if (temporary_payload)
+        {
+            if (vr != VK_SUCCESS)
+            {
+                WARN("Batched image descriptor fetch failed with %d; using synchronous fallback.\n", vr);
+                vkd3d_materialize_image_descriptors_fallback(
+                        device, descriptors + begin, chunk_count, temporary_payload);
+            }
+
+            payload_offset = 0;
+            pthread_mutex_lock(&manager->mutex);
+            for (i = 0; i < chunk_count; ++i)
+            {
+                const struct vkd3d_pending_image_descriptor *descriptor = &descriptors[begin + i];
+                const struct vkd3d_pending_image_descriptor_slot *slot =
+                        vkd3d_pending_image_descriptor_get_slot_locked(
+                                manager, descriptor->descriptor_va, false);
+                if (slot && slot->generation == descriptor->generation)
+                {
+                    memcpy(descriptor->payload, temporary_payload + payload_offset,
+                            descriptor->descriptor_size);
+                }
+                else
+                {
+                    ++manager->stale_response_count;
+                }
+                payload_offset += descriptor->descriptor_size;
+            }
+            pthread_mutex_unlock(&manager->mutex);
+        }
+        else
+        {
+            uint8_t single_payload[VKD3D_MAX_DESCRIPTOR_SIZE];
+
+            WARN("Failed to allocate temporary image descriptor payload; using item fallback.\n");
+            for (i = 0; i < chunk_count; ++i)
+            {
+                const struct vkd3d_pending_image_descriptor *descriptor = &descriptors[begin + i];
+                const struct vkd3d_pending_image_descriptor_slot *slot;
+
+                vkd3d_materialize_image_descriptors_fallback(
+                        device, &descriptors[begin + i], 1, single_payload);
+
+                pthread_mutex_lock(&manager->mutex);
+                slot = vkd3d_pending_image_descriptor_get_slot_locked(
+                        manager, descriptor->descriptor_va, false);
+                if (slot && slot->generation == descriptor->generation)
+                    memcpy(descriptor->payload, single_payload, descriptor->descriptor_size);
+                else
+                    ++manager->stale_response_count;
+                pthread_mutex_unlock(&manager->mutex);
+            }
+        }
+        vkd3d_free(temporary_payload);
+        vkd3d_free(requests);
+        begin += chunk_count;
+    }
+
+    for (begin = 0; begin < descriptor_count; ++begin)
+        if (descriptors[begin].view)
+            vkd3d_view_decref(descriptors[begin].view, device);
+    vkd3d_free(descriptors);
+
+    TRACE("Pending image descriptor stale responses: %"PRIu64".\n",
+            manager->stale_response_count);
+    pthread_mutex_unlock(&manager->flush_mutex);
+
+    switch (reason)
+    {
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS:
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_flush_copy, descriptor_count);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS:
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_flush_execute, descriptor_count);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT:
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_flush_pre_submit, descriptor_count);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN:
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_flush_heap_teardown, descriptor_count);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN:
+            VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_flush_device_teardown, descriptor_count);
+            break;
+    }
+
+    VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_materialize, descriptor_count);
+    return true;
+}
+
+void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    size_t i;
+
+    if (device->vk_device)
+        vkd3d_pending_image_descriptors_flush(
+                device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN);
+
+    for (i = 0; i < manager->descriptor_count; ++i)
+        if (manager->descriptors[i].view)
+            vkd3d_view_decref(manager->descriptors[i].view, device);
+    vkd3d_free(manager->descriptors);
+    vkd3d_free(manager->slots);
+    manager->descriptors = NULL;
+    manager->descriptor_count = 0;
+    manager->slots = NULL;
+    manager->slot_count = 0;
+    pthread_mutex_destroy(&manager->flush_mutex);
+    pthread_mutex_destroy(&manager->mutex);
+}
+
 void d3d12_desc_copy_single(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
         struct d3d12_device *device)
 {
@@ -5770,6 +6306,9 @@ void d3d12_desc_create_cbv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     VkDescriptorAddressInfoEXT addr_info;
     struct d3d12_desc_split_embedded d;
     VkDescriptorGetInfoEXT get_info;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_cbv_embedded);
+
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
 
     if (!desc)
     {
@@ -5813,9 +6352,11 @@ void d3d12_desc_create_cbv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     d3d12_descriptor_heap_write_null_descriptor_template_embedded_partial(device, desc_va,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, device->bindless_state.descriptor_buffer_packed_raw_buffer_offset);
 
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_cbv_embedded);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.robustUniformBufferDescriptorSize,
             d.payload + device->bindless_state.descriptor_buffer_packed_raw_buffer_offset));
+    VKD3D_REGION_END(vkGetDescriptorEXT_cbv_embedded);
 }
 
 void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
@@ -5836,6 +6377,10 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
     void *payload;
 
     uint32_t info_index;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_cbv);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_cbv_null_typed_sibling);
+
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
 
     if (!desc)
     {
@@ -5894,9 +6439,11 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
         addr_info.address = desc->BufferLocation;
         addr_info.range = desc->SizeInBytes;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_cbv);
         VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                 device->device_info.descriptor_buffer_properties.robustUniformBufferDescriptorSize,
                 payload));
+        VKD3D_REGION_END(vkGetDescriptorEXT_cbv);
 #ifdef VKD3D_ENABLE_DESCRIPTOR_QA
         /* Only used for descriptor QA in this path. */
         resource = vkd3d_va_map_deref(&device->memory_allocator.va_map, desc->BufferLocation);
@@ -5937,9 +6484,11 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
             get_info.type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
             get_info.data.pUniformTexelBuffer = NULL;
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_cbv_null_typed_sibling);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustUniformTexelBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_cbv_null_typed_sibling);
         }
         else
         {
@@ -6107,6 +6656,8 @@ static void vkd3d_create_buffer_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     VkDescriptorAddressInfoEXT addr_info;
     struct d3d12_desc_split_embedded d;
     VkDescriptorGetInfoEXT get_info;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_srv_embedded_storage);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_srv_embedded_texel);
 
     if (!desc)
     {
@@ -6158,9 +6709,11 @@ static void vkd3d_create_buffer_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     addr_info.address = view.va;
     addr_info.range = view.range;
     addr_info.format = VK_FORMAT_UNDEFINED;
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_srv_embedded_storage);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
             d.payload + device->bindless_state.descriptor_buffer_packed_raw_buffer_offset));
+    VKD3D_REGION_END(vkGetDescriptorEXT_buffer_srv_embedded_storage);
 
     /* Emit texel buffer alias. */
     get_info.type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
@@ -6181,9 +6734,11 @@ static void vkd3d_create_buffer_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
                     vkd3d_structured_srv_to_texel_buffer_dxgi_format(desc->Buffer.StructureByteStride));
         }
     }
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_srv_embedded_texel);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.robustUniformTexelBufferDescriptorSize,
             d.payload));
+    VKD3D_REGION_END(vkGetDescriptorEXT_buffer_srv_embedded_texel);
 }
 
 static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
@@ -6209,6 +6764,8 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
     bool emit_typed;
     bool emit_ssbo;
     void *payload;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_srv_storage);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_srv_texel);
 
     if (!desc)
     {
@@ -6328,9 +6885,11 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
             addr_info.range = d.view->info.buffer.range;
             addr_info.format = VK_FORMAT_UNDEFINED;
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_srv_storage);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_buffer_srv_storage);
         }
         else
         {
@@ -6401,9 +6960,11 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
                 }
             }
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_srv_texel);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustUniformTexelBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_buffer_srv_texel);
         }
         else
         {
@@ -6703,6 +7264,8 @@ static void vkd3d_create_texture_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     VkDescriptorGetInfoEXT get_info;
     struct vkd3d_view *view = NULL;
     VkDescriptorImageInfo image;
+    size_t descriptor_size;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_srv_embedded);
 
     if (!resource)
     {
@@ -6723,9 +7286,14 @@ static void vkd3d_create_texture_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     get_info.pNext = NULL;
     get_info.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     get_info.data.pSampledImage = &image;
-    VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
-            device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize,
-            d.payload));
+    descriptor_size = device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize;
+    if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, d.payload, view,
+            VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, image.imageLayout, descriptor_size))
+    {
+        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_srv_embedded);
+        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info, descriptor_size, d.payload));
+        VKD3D_REGION_END(vkGetDescriptorEXT_texture_srv_embedded);
+    }
 }
 
 static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
@@ -6743,6 +7311,9 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
     struct d3d12_desc_split d;
     uint32_t info_index;
     void *payload;
+    size_t descriptor_size;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_srv);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_srv_null_storage_sibling);
 
     if (!resource)
     {
@@ -6776,9 +7347,14 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         get_info.data.pSampledImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
-        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
-                device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize,
-                payload));
+        descriptor_size = device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize;
+        if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
+                VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
+        {
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_srv);
+            VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info, descriptor_size, payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_texture_srv);
+        }
     }
     else
     {
@@ -6812,9 +7388,11 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
             get_info.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             get_info.data.pStorageBuffer = NULL;
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_srv_null_storage_sibling);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_texture_srv_null_storage_sibling);
         }
         else
         {
@@ -6843,6 +7421,8 @@ void d3d12_desc_create_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
 {
     bool is_buffer;
 
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
+
     if (resource)
     {
         is_buffer = d3d12_resource_is_buffer(resource);
@@ -6869,6 +7449,8 @@ void d3d12_desc_create_srv(vkd3d_cpu_descriptor_va_t desc_va,
         const D3D12_SHADER_RESOURCE_VIEW_DESC *desc)
 {
     bool is_buffer;
+
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
 
     if (resource)
     {
@@ -6935,6 +7517,8 @@ static void vkd3d_create_buffer_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, 
     struct d3d12_desc_split_embedded d;
     struct d3d12_desc_split_metadata m;
     VkDescriptorGetInfoEXT get_info;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_uav_embedded_storage);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_uav_embedded_texel);
 
     if (!desc)
     {
@@ -6975,9 +7559,11 @@ static void vkd3d_create_buffer_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, 
     addr_info.address = view.va;
     addr_info.range = view.range;
     addr_info.format = VK_FORMAT_UNDEFINED;
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_uav_embedded_storage);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
             d.payload + device->bindless_state.descriptor_buffer_packed_raw_buffer_offset));
+    VKD3D_REGION_END(vkGetDescriptorEXT_buffer_uav_embedded_storage);
 
     /* UAV counter and texel buffers alias. This is fine. We don't expect having to work around
      * scenarios where this happens.
@@ -7015,9 +7601,11 @@ static void vkd3d_create_buffer_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, 
         }
     }
 
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_uav_embedded_texel);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.robustStorageTexelBufferDescriptorSize,
             d.payload));
+    VKD3D_REGION_END(vkGetDescriptorEXT_buffer_uav_embedded_texel);
 }
 
 static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3d12_device *device,
@@ -7045,6 +7633,8 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
     bool emit_typed;
     bool emit_ssbo;
     void *payload;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_uav_storage);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_buffer_uav_texel);
 
     if (!desc)
     {
@@ -7121,9 +7711,11 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
             addr_info.range = d.view->info.buffer.range;
             addr_info.format = VK_FORMAT_UNDEFINED;
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_uav_storage);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_buffer_uav_storage);
         }
         else
         {
@@ -7197,9 +7789,11 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
             }
 
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_buffer_uav_texel);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustStorageTexelBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_buffer_uav_texel);
         }
         else
         {
@@ -7286,6 +7880,8 @@ static void vkd3d_create_texture_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     VkDescriptorGetInfoEXT get_info;
     struct vkd3d_view *view = NULL;
     VkDescriptorImageInfo image;
+    size_t descriptor_size;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_uav_embedded);
 
     d = d3d12_desc_decode_embedded_resource_va(desc_va);
     m = d3d12_desc_decode_metadata(device, desc_va);
@@ -7312,9 +7908,14 @@ static void vkd3d_create_texture_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     get_info.pNext = NULL;
     get_info.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     get_info.data.pStorageImage = &image;
-    VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
-            device->device_info.descriptor_buffer_properties.storageImageDescriptorSize,
-            d.payload));
+    descriptor_size = device->device_info.descriptor_buffer_properties.storageImageDescriptorSize;
+    if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, d.payload, view,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, image.imageLayout, descriptor_size))
+    {
+        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_uav_embedded);
+        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info, descriptor_size, d.payload));
+        VKD3D_REGION_END(vkGetDescriptorEXT_texture_uav_embedded);
+    }
 
     /* We should clear out the sibling raw resource that is packed in the higher bits.
      * If we have planar metadata there isn't much we can do since the storage image will take up the entire
@@ -7345,6 +7946,9 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
     struct d3d12_desc_split d;
     uint32_t info_index;
     void *payload;
+    size_t descriptor_size;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_uav);
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_texture_uav_null_storage_sibling);
 
     if (!resource)
     {
@@ -7375,11 +7979,16 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
         get_info.pNext = NULL;
         get_info.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        get_info.data.pSampledImage = &descriptor_info.image;
+        get_info.data.pStorageImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
-        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
-                device->device_info.descriptor_buffer_properties.storageImageDescriptorSize,
-                payload));
+        descriptor_size = device->device_info.descriptor_buffer_properties.storageImageDescriptorSize;
+        if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
+        {
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_uav);
+            VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info, descriptor_size, payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_texture_uav);
+        }
     }
     else
     {
@@ -7413,9 +8022,11 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
             get_info.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             get_info.data.pStorageBuffer = NULL;
             payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_uav_null_storage_sibling);
             VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                     device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                     payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_texture_uav_null_storage_sibling);
         }
         else
         {
@@ -7443,6 +8054,8 @@ void d3d12_desc_create_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, struct d3
         const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc)
 {
     bool is_buffer;
+
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
 
     if (resource)
     {
@@ -7472,6 +8085,8 @@ void d3d12_desc_create_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3d12_devic
         const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc)
 {
     bool is_buffer;
+
+    vkd3d_pending_image_descriptor_invalidate(device, desc_va);
 
     if (resource)
     {
@@ -7830,6 +8445,7 @@ void d3d12_desc_create_sampler_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     VkDescriptorGetInfoEXT get_info;
     struct vkd3d_view_key key;
     struct vkd3d_view *view;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_sampler_embedded);
 
     if (!desc)
     {
@@ -7847,9 +8463,11 @@ void d3d12_desc_create_sampler_embedded(vkd3d_cpu_descriptor_va_t desc_va,
     get_info.pNext = NULL;
     get_info.type = VK_DESCRIPTOR_TYPE_SAMPLER;
     get_info.data.pSampler = &view->vk_sampler;
+    VKD3D_REGION_BEGIN(vkGetDescriptorEXT_sampler_embedded);
     VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
             device->device_info.descriptor_buffer_properties.samplerDescriptorSize,
             (void *)desc_va));
+    VKD3D_REGION_END(vkGetDescriptorEXT_sampler_embedded);
 }
 
 void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
@@ -7865,6 +8483,7 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
     struct vkd3d_view *view;
     uint32_t info_index;
     void *payload;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_sampler);
 
     if (!desc)
     {
@@ -7899,9 +8518,11 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.type = VK_DESCRIPTOR_TYPE_SAMPLER;
         get_info.data.pSampler = &view->vk_sampler;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_sampler);
         VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                 device->device_info.descriptor_buffer_properties.samplerDescriptorSize,
                 payload));
+        VKD3D_REGION_END(vkGetDescriptorEXT_sampler);
     }
     else
     {
@@ -8805,6 +9426,7 @@ static void d3d12_descriptor_heap_update_extra_bindings(struct d3d12_descriptor_
     VkDescriptorGetInfoEXT get_info;
     VkDeviceSize binding_offset;
     uint32_t flags;
+    VKD3D_REGION_DECL(vkGetDescriptorEXT_descriptor_heap_extra_binding);
 
     get_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
     get_info.pNext = NULL;
@@ -8900,9 +9522,11 @@ static void d3d12_descriptor_heap_update_extra_bindings(struct d3d12_descriptor_
                         vkd3d_get_buffer_device_address(device, vk_buffer->buffer) + vk_buffer->offset;
                 desc_addr_info.range = vk_buffer->range;
                 assert(vk_buffer->range != VK_WHOLE_SIZE);
+                VKD3D_REGION_BEGIN(vkGetDescriptorEXT_descriptor_heap_extra_binding);
                 VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
                         device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                         host_ptr));
+                VKD3D_REGION_END(vkGetDescriptorEXT_descriptor_heap_extra_binding);
             }
             else
                 write_count += 1;
@@ -9311,6 +9935,10 @@ void d3d12_descriptor_heap_cleanup(struct d3d12_descriptor_heap *descriptor_heap
 {
     const struct vkd3d_vk_device_procs *vk_procs = &descriptor_heap->device->vk_procs;
     struct d3d12_device *device = descriptor_heap->device;
+
+    if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        vkd3d_pending_image_descriptors_flush(
+                device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN);
 
 #ifndef VKD3D_NO_TRACE_MESSAGES
     if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||

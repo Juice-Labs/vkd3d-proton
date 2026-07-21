@@ -145,12 +145,15 @@ static void (*pfn_tracy_emit_zone_end)( TracyCZoneCtx ctx );
 static void vkd3d_init_profiling_once(void)
 {
 #if defined(_WIN32)
-#define SONAME_TRACY "tracy.dll"
+#define SONAME_TRACY "TracyClient.dll"
+#define SONAME_TRACY_FALLBACK "tracy.dll"
 #else
 #error "Unrecognized platform."
 #endif
 
     vkd3d_module_t tracy = vkd3d_dlopen(SONAME_TRACY);
+    if (!tracy)
+        tracy = vkd3d_dlopen(SONAME_TRACY_FALLBACK);
     if(tracy)
     {
         pfn_tracy_set_thread_name = vkd3d_dlsym(tracy, "___tracy_set_thread_name");
@@ -180,7 +183,11 @@ bool vkd3d_uses_profiling(void)
 #else
 bool vkd3d_uses_profiling(void)
 {
+#ifdef DYNAMIC_TRACY
+    return pfn_tracy_emit_zone_begin != NULL;
+#else
     return true;
+#endif
 }
 #endif /* TRACY_ENABLE */
 
@@ -255,7 +262,7 @@ void tracy_emit_frame_mark()
 
 TracyCZoneCtx tracy_emit_zone_begin(const struct ___tracy_source_location_data *srcloc, int active)
 {
-    TracyCZoneCtx ctx;
+    TracyCZoneCtx ctx = {0};
     if(pfn_tracy_emit_zone_begin)
         ctx = pfn_tracy_emit_zone_begin(srcloc, active);
     return ctx;
