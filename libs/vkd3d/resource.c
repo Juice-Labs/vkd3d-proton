@@ -5342,14 +5342,10 @@ void vkd3d_descriptor_journal_post_init(struct d3d12_device *device)
 void vkd3d_descriptor_journal_cleanup(struct d3d12_device *device)
 {
     struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
-    size_t i;
 
     if (journal->enabled && device->vk_device)
         vkd3d_descriptor_journal_flush(device);
 
-    for (i = 0; i < journal->entry_count; ++i)
-        if (journal->entries[i].view)
-            vkd3d_view_decref(journal->entries[i].view, device);
     vkd3d_free(journal->entries);
     vkd3d_free(journal->bytes);
     journal->entries = NULL;
@@ -5380,7 +5376,7 @@ static struct vkd3d_descriptor_journal_entry *vkd3d_descriptor_journal_append_lo
     entry->vk_image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     entry->data_size = data_size;
     entry->repeat_count = 1;
-    entry->view = NULL;
+    entry->vk_handle = 0;
     entry->byte_offset = 0;
     return entry;
 }
@@ -5443,7 +5439,6 @@ void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const stru
     struct vkd3d_descriptor_journal_entry *entry;
     uint32_t image_set_index = UINT32_MAX;
     const uint8_t *base;
-    struct vkd3d_view *view;
     uint32_t mask;
     uint8_t flags;
 
@@ -5457,17 +5452,21 @@ void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const stru
 
     base = heap->descriptor_buffer.host_allocation;
     flags = d->view->info.flags;
-    view = (flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW) ? d->view->info.image.view : NULL;
 
     pthread_mutex_lock(&journal->mutex);
 
+    /* MATERIALIZE_SYMBOLIC is only ever set by the texture SRV/UAV and
+     * sampler create paths (and propagated by copies), so this branch never
+     * has to look at the vkd3d_view pointer, which may dangle for copied
+     * stale descriptors. The handle was captured at create time into the
+     * heap's symbolic_handles side array. A null handle (failed view
+     * creation) becomes a symbolic op with a null handle; the server
+     * resolves it to a null descriptor. */
     if ((flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW) &&
-            (!view || view->type == VKD3D_VIEW_TYPE_IMAGE || view->type == VKD3D_VIEW_TYPE_SAMPLER))
+            (flags & VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC))
     {
         /* Create paths store the plane holding the image/sampler payload in
-         * single_binding even when the slot spans multiple planes. A NULL
-         * view (failed view creation) becomes a symbolic op with a null
-         * handle; the server resolves it to a null descriptor. */
+         * single_binding even when the slot spans multiple planes. */
         VkDescriptorType vk_descriptor_type = (VkDescriptorType)d->view->info.image.vk_descriptor_type;
         const uint8_t *payload;
         size_t size;
@@ -5487,9 +5486,7 @@ void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const stru
             if (entry)
             {
                 entry->vk_image_layout = (VkImageLayout)d->view->info.image.vk_image_layout;
-                entry->view = view;
-                if (view)
-                    vkd3d_view_incref(view);
+                entry->vk_handle = heap->symbolic_handles ? heap->symbolic_handles[d->offset] : 0;
             }
         }
         else
@@ -5533,37 +5530,40 @@ void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const stru
     vkd3d_descriptor_journal_maybe_flush(device);
 }
 
-void vkd3d_descriptor_journal_note_slot(struct d3d12_device *device, vkd3d_cpu_descriptor_va_t desc_va)
+/* Called after a descriptor copy has copied payload bytes and metadata:
+ * propagates the symbolic-handle side array the same way (plain data, no
+ * vkd3d_view dereference) and journals the destination range when it lives
+ * on a shader-visible heap. */
+void vkd3d_descriptor_journal_note_copy(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va, unsigned int count)
 {
-    struct d3d12_desc_split d;
-
-    if (!device->descriptor_journal.enabled)
-        return;
-
-    d = d3d12_desc_decode_va(desc_va);
-    vkd3d_descriptor_journal_note_split(device, &d);
-}
-
-void vkd3d_descriptor_journal_note_range(struct d3d12_device *device,
-        vkd3d_cpu_descriptor_va_t dst_va, unsigned int count)
-{
-    struct d3d12_desc_split d;
+    struct d3d12_desc_split dst;
+    struct d3d12_desc_split src;
     struct d3d12_desc_split iter;
     unsigned int i;
 
     if (!device->descriptor_journal.enabled || !count)
         return;
 
-    d = d3d12_desc_decode_va(dst_va);
-    if (!(d.heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+    dst = d3d12_desc_decode_va(dst_va);
+    src = d3d12_desc_decode_va(src_va);
+
+    if (dst.heap->symbolic_handles && src.heap->symbolic_handles)
+    {
+        memcpy(dst.heap->symbolic_handles + dst.offset,
+                src.heap->symbolic_handles + src.offset,
+                count * sizeof(*dst.heap->symbolic_handles));
+    }
+
+    if (!(dst.heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
         return;
 
     for (i = 0; i < count; ++i)
     {
-        iter.heap = d.heap;
-        iter.types = d.types + i;
-        iter.view = d.view + i;
-        iter.offset = d.offset + i;
+        iter.heap = dst.heap;
+        iter.types = dst.types + i;
+        iter.view = dst.view + i;
+        iter.offset = dst.offset + i;
         vkd3d_descriptor_journal_note_split(device, &iter);
     }
 }
@@ -5711,14 +5711,10 @@ bool vkd3d_descriptor_journal_flush(struct d3d12_device *device)
             write->imageLayout = entry->vk_image_layout;
             write->dataSize = entry->data_size;
             write->repeatCount = entry->repeat_count;
-            if (entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_IMAGE)
+            if (entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_IMAGE ||
+                    entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_SAMPLER)
             {
-                write->handle = entry->view ? (uint64_t)(uintptr_t)entry->view->vk_image_view : 0;
-                write->pData = NULL;
-            }
-            else if (entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_SAMPLER)
-            {
-                write->handle = entry->view ? (uint64_t)(uintptr_t)entry->view->vk_sampler : 0;
+                write->handle = entry->vk_handle;
                 write->pData = NULL;
             }
             else
@@ -5740,9 +5736,6 @@ bool vkd3d_descriptor_journal_flush(struct d3d12_device *device)
     if (!writes)
         ERR("Failed to allocate descriptor write batch; dropping %zu ops.\n", entry_count);
 
-    for (i = 0; i < entry_count; ++i)
-        if (entries[i].view)
-            vkd3d_view_decref(entries[i].view, device);
     vkd3d_free(writes);
     vkd3d_free(entries);
     vkd3d_free(bytes);
@@ -5852,7 +5845,7 @@ void d3d12_desc_copy_single(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descript
     *dst.view = *src.view;
 
     if (d3d12_device_use_descriptor_materialization(device))
-        vkd3d_descriptor_journal_note_split(device, &dst);
+        vkd3d_descriptor_journal_note_copy(device, dst_va, src_va, 1);
 }
 
 void d3d12_desc_copy_range(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
@@ -5925,7 +5918,7 @@ void d3d12_desc_copy_range(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descripto
         VK_CALL(vkUpdateDescriptorSets(device->vk_device, 0, NULL, copy_count, vk_copies));
 
     if (d3d12_device_use_descriptor_materialization(device))
-        vkd3d_descriptor_journal_note_range(device, dst_va, count);
+        vkd3d_descriptor_journal_note_copy(device, dst_va, src_va, count);
 }
 
 /* Accumulating version of d3d12_desc_copy_range that doesn't call vkUpdateDescriptorSets immediately.
@@ -6005,7 +5998,7 @@ static bool d3d12_desc_copy_range_accumulate(vkd3d_cpu_descriptor_va_t dst_va, v
     }
 
     if (d3d12_device_use_descriptor_materialization(device))
-        vkd3d_descriptor_journal_note_range(device, dst_va, count);
+        vkd3d_descriptor_journal_note_copy(device, dst_va, src_va, count);
 
     *copy_count_inout = copy_count;
     return true;
@@ -7859,9 +7852,12 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
     binding = vkd3d_bindless_state_binding_from_info_index(&device->bindless_state, info_index);
 
     d.view->info.image.view = view;
-    d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL;
+    d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL |
+            VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC;
     d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     d.view->info.image.vk_image_layout = (uint32_t)descriptor_info.image.imageLayout;
+    if (d.heap->symbolic_handles)
+        d.heap->symbolic_handles[d.offset] = (uint64_t)(uintptr_t)descriptor_info.image.imageView;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
@@ -7873,10 +7869,12 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.data.pSampledImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
         descriptor_size = device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize;
-        if (d3d12_device_use_descriptor_materialization(device))
+        if (d3d12_device_use_descriptor_materialization(device) && !device->descriptor_journal.verify)
         {
             /* The server materializes the bytes from the journal op emitted at
-             * the end of this function; no local payload write or RPC. */
+             * the end of this function; no local payload write or RPC. In
+             * verify mode the client keeps fetching real bytes so the
+             * server-side comparison is meaningful. */
         }
         else if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
                 VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
@@ -8506,9 +8504,12 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
     binding = vkd3d_bindless_state_binding_from_info_index(&device->bindless_state, info_index);
 
     d.view->info.image.view = view;
-    d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL;
+    d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL |
+            VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC;
     d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     d.view->info.image.vk_image_layout = (uint32_t)descriptor_info.image.imageLayout;
+    if (d.heap->symbolic_handles)
+        d.heap->symbolic_handles[d.offset] = (uint64_t)(uintptr_t)descriptor_info.image.imageView;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
@@ -8520,10 +8521,12 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.data.pStorageImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
         descriptor_size = device->device_info.descriptor_buffer_properties.storageImageDescriptorSize;
-        if (d3d12_device_use_descriptor_materialization(device))
+        if (d3d12_device_use_descriptor_materialization(device) && !device->descriptor_journal.verify)
         {
             /* The server materializes the bytes from the journal op emitted at
-             * the end of this function; no local payload write or RPC. */
+             * the end of this function; no local payload write or RPC. In
+             * verify mode the client keeps fetching real bytes so the
+             * server-side comparison is meaningful. */
         }
         else if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
@@ -9053,20 +9056,25 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
     d.view->info.image.view = view;
     d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW |
             VKD3D_DESCRIPTOR_FLAG_NON_NULL |
-            VKD3D_DESCRIPTOR_FLAG_SINGLE_DESCRIPTOR;
+            VKD3D_DESCRIPTOR_FLAG_SINGLE_DESCRIPTOR |
+            VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC;
     d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_SAMPLER;
     d.view->info.image.vk_image_layout = (uint32_t)VK_IMAGE_LAYOUT_UNDEFINED;
+    if (d.heap->symbolic_handles)
+        d.heap->symbolic_handles[d.offset] = (uint64_t)(uintptr_t)view->vk_sampler;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
     if (d3d12_device_uses_descriptor_buffers(device))
     {
-        if (d3d12_device_use_descriptor_materialization(device))
+        if (d3d12_device_use_descriptor_materialization(device) && !device->descriptor_journal.verify)
         {
             /* Sampler descriptor bytes are opaque server bytes; skip the
              * blocking fetch entirely. Shader-visible slots get a symbolic op
              * below; non-shader-visible slots only serve as copy sources and
-             * copies are lowered from metadata. */
+             * copies are lowered from metadata. In verify mode the client
+             * keeps fetching real bytes so the server-side comparison is
+             * meaningful. */
         }
         else
         {
@@ -10210,6 +10218,18 @@ static HRESULT d3d12_descriptor_heap_init(struct d3d12_descriptor_heap *descript
     descriptor_heap->device = device;
     descriptor_heap->desc = *desc;
 
+    if (d3d12_device_use_descriptor_materialization(device) && desc->NumDescriptors &&
+            (desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+                    desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER))
+    {
+        if (!(descriptor_heap->symbolic_handles = vkd3d_calloc(desc->NumDescriptors,
+                sizeof(*descriptor_heap->symbolic_handles))))
+        {
+            hr = E_OUTOFMEMORY;
+            goto fail;
+        }
+    }
+
     if (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
         descriptor_heap->gpu_va = d3d12_device_get_descriptor_heap_gpu_va(device, desc->Type);
 
@@ -10551,6 +10571,8 @@ void d3d12_descriptor_heap_cleanup(struct d3d12_descriptor_heap *descriptor_heap
         vkd3d_free_aligned(descriptor_heap->descriptor_buffer.host_allocation);
     vkd3d_free_device_memory(device, &descriptor_heap->descriptor_buffer.device_allocation);
     VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
+
+    vkd3d_free(descriptor_heap->symbolic_handles);
 
     vkd3d_descriptor_debug_unregister_heap(descriptor_heap->cookie);
 }

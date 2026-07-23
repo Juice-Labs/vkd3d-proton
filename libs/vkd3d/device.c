@@ -6300,7 +6300,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
     if ((descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
             descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) &&
             d3d12_device_use_descriptor_materialization(device))
-        vkd3d_descriptor_journal_note_range(device, dst_descriptor_range_offset.ptr, descriptor_count);
+    {
+        vkd3d_descriptor_journal_note_copy(device, dst_descriptor_range_offset.ptr,
+                src_descriptor_range_offset.ptr, descriptor_count);
+    }
 
     if (pending_copy_locked)
         d3d12_device_end_copy_pending_image_descriptors(device);
@@ -6418,7 +6421,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
     if ((descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
             descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) &&
             d3d12_device_use_descriptor_materialization(device))
-        vkd3d_descriptor_journal_note_range(device, dst_descriptor_range_offset.ptr, descriptor_count);
+    {
+        vkd3d_descriptor_journal_note_copy(device, dst_descriptor_range_offset.ptr,
+                src_descriptor_range_offset.ptr, descriptor_count);
+    }
 
     if (pending_copy_locked)
         d3d12_device_end_copy_pending_image_descriptors(device);

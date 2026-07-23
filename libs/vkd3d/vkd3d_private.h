@@ -1368,6 +1368,12 @@ enum vkd3d_descriptor_flag
     VKD3D_DESCRIPTOR_FLAG_BUFFER_VA_RANGE   = (1 << 3),
     VKD3D_DESCRIPTOR_FLAG_NON_NULL          = (1 << 4),
     VKD3D_DESCRIPTOR_FLAG_SINGLE_DESCRIPTOR = (1 << 5),
+    /* JUICE descriptor materialization: the slot's payload plane holds opaque
+     * image/sampler bytes and must be lowered to a symbolic server-side op
+     * (vk_descriptor_type/vk_image_layout in the image metadata plus the
+     * heap's symbolic_handles entry describe it). Set only by texture
+     * SRV/UAV and sampler create paths; copied along with the metadata. */
+    VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC = (1 << 6),
 };
 
 struct vkd3d_descriptor_binding
@@ -1476,10 +1482,9 @@ struct d3d12_desc_split;
 HRESULT vkd3d_descriptor_journal_init(struct d3d12_device *device);
 void vkd3d_descriptor_journal_post_init(struct d3d12_device *device);
 void vkd3d_descriptor_journal_cleanup(struct d3d12_device *device);
-void vkd3d_descriptor_journal_note_slot(struct d3d12_device *device, vkd3d_cpu_descriptor_va_t desc_va);
 void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const struct d3d12_desc_split *split);
-void vkd3d_descriptor_journal_note_range(struct d3d12_device *device,
-        vkd3d_cpu_descriptor_va_t dst_va, unsigned int count);
+void vkd3d_descriptor_journal_note_copy(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va, unsigned int count);
 void vkd3d_descriptor_journal_note_heap_init(struct d3d12_descriptor_heap *heap,
         const uint8_t * const *null_payloads, const size_t *null_payload_offsets,
         const size_t *null_payload_sizes, unsigned int set_count, size_t descriptor_count);
@@ -1653,6 +1658,15 @@ struct d3d12_descriptor_heap
 #endif
 
     struct d3d12_null_descriptor_template null_descriptor_template;
+
+    /* JUICE descriptor materialization: per-slot VkImageView/VkSampler
+     * handle backing VKD3D_DESCRIPTOR_FLAG_MATERIALIZE_SYMBOLIC slots.
+     * Written at descriptor create time (view known-alive) and copied as
+     * plain data alongside the metadata in every descriptor copy path, so
+     * journal ops never have to dereference possibly-dangling vkd3d_view
+     * pointers. Allocated for CBV_SRV_UAV/SAMPLER heaps when
+     * materialization is enabled, NULL otherwise. */
+    uint64_t *symbolic_handles;
 
     struct d3d12_device *device;
 
@@ -5493,10 +5507,15 @@ struct vkd3d_descriptor_journal_entry
     VkImageLayout vk_image_layout;
     uint32_t data_size;
     uint32_t repeat_count;
-    /* Ref held for IMAGE/SAMPLER ops until the entry is flushed, so the
-     * client handle stays valid until the op has been serialized ahead of
-     * any destroy. */
-    struct vkd3d_view *view;
+    /* VkImageView/VkSampler handle for IMAGE/SAMPLER ops, captured while the
+     * view was known-alive (descriptor create). Deliberately NOT a
+     * vkd3d_view pointer: descriptor metadata view pointers may dangle (the
+     * view map destroys views outright with the resource, ignoring
+     * refcounts), so the journal must never dereference or refcount them. If
+     * the handle is destroyed before the flush is serialized, the server
+     * resolves it to a null descriptor, which is fine: using such a stale
+     * slot is undefined in D3D12 anyway. */
+    uint64_t vk_handle;
     /* Offset into the journal byte arena for LITERAL/NULL_TEMPLATE ops. */
     size_t byte_offset;
 };
