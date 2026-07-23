@@ -1218,6 +1218,19 @@ static void vkd3d_config_flags_init_once(void)
 
     if (vkd3d_config_flags)
         INFO("VKD3D_CONFIG='%s'.\n", config);
+
+    /* JUICE: server-side descriptor materialization is enabled by default.
+     * Opt out for debugging with VKD3D_CONFIG=no_descriptor_materialization.
+     * Runtime guards still self-disable it (with a WARN) when descriptor
+     * buffers are off, embedded mutable descriptors are on, or the ICD does
+     * not expose vkWriteDescriptorsJUICE; see
+     * vkd3d_descriptor_journal_post_init. */
+    vkd3d_config_flags |= VKD3D_CONFIG_FLAG_DESCRIPTOR_MATERIALIZATION;
+    if (vkd3d_debug_list_has_member(config, "no_descriptor_materialization"))
+    {
+        INFO("Descriptor materialization disabled via VKD3D_CONFIG.\n");
+        vkd3d_config_flags &= ~VKD3D_CONFIG_FLAG_DESCRIPTOR_MATERIALIZATION;
+    }
 }
 
 static pthread_once_t vkd3d_config_flags_once = PTHREAD_ONCE_INIT;
