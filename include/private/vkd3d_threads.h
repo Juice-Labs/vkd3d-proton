@@ -257,6 +257,22 @@ static inline int condvar_reltime_wait_timeout_seconds(condvar_reltime_t *cond, 
         return -1;
 }
 
+static inline int condvar_reltime_wait_timeout_ms(condvar_reltime_t *cond, pthread_mutex_t *lock, unsigned int ms)
+{
+    BOOL ret = SleepConditionVariableSRW(&cond->cond, &lock->lock, ms, 0);
+    if (ret)
+        return 0;
+    else if (GetLastError() == ERROR_TIMEOUT)
+        return 1;
+    else
+        return -1;
+}
+
+static inline int condvar_reltime_wait(condvar_reltime_t *cond, pthread_mutex_t *lock)
+{
+    return pthread_cond_wait(cond, lock);
+}
+
 typedef HRESULT (WINAPI *PFN_SetThreadDescription)(HANDLE, PCWSTR);
 
 static inline void vkd3d_set_thread_name(const char *name)
@@ -387,6 +403,36 @@ static inline int condvar_reltime_wait_timeout_seconds(condvar_reltime_t *cond, 
         return 0;
     else
         return -1;
+}
+
+static inline int condvar_reltime_wait_timeout_ms(condvar_reltime_t *cond, pthread_mutex_t *lock, unsigned int ms)
+{
+    struct timespec ts;
+    int rc;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += ms / 1000;
+    ts.tv_nsec += (long)(ms % 1000) * 1000000;
+    if (ts.tv_nsec >= 1000000000)
+    {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000;
+    }
+
+    /* This is absolute time. */
+    rc = pthread_cond_timedwait(&cond->cond, lock, &ts);
+
+    if (rc == ETIMEDOUT)
+        return 1;
+    else if (rc == 0)
+        return 0;
+    else
+        return -1;
+}
+
+static inline int condvar_reltime_wait(condvar_reltime_t *cond, pthread_mutex_t *lock)
+{
+    return pthread_cond_wait(&cond->cond, lock);
 }
 
 #define PTHREAD_ONCE_CALLBACK

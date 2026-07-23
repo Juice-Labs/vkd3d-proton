@@ -4710,9 +4710,16 @@ void vkd3d_view_decref(struct vkd3d_view *view, struct d3d12_device *device)
         vkd3d_view_destroy(view, device);
 }
 
+#define VKD3D_PENDING_IMAGE_DESCRIPTOR_DEFAULT_ASYNC_THRESHOLD 64
+#define VKD3D_PENDING_IMAGE_DESCRIPTOR_DEFAULT_ASYNC_TIMEOUT_MS 2
+
+static void *vkd3d_pending_image_descriptor_worker_main(void *arg);
+
 HRESULT vkd3d_pending_image_descriptors_init(struct d3d12_device *device)
 {
     struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    unsigned long timeout_ms = VKD3D_PENDING_IMAGE_DESCRIPTOR_DEFAULT_ASYNC_TIMEOUT_MS;
+    char env[32];
     int rc;
 
     memset(manager, 0, sizeof(*manager));
@@ -4723,8 +4730,71 @@ HRESULT vkd3d_pending_image_descriptors_init(struct d3d12_device *device)
         pthread_mutex_destroy(&manager->mutex);
         return hresult_from_errno(rc);
     }
+    condvar_reltime_init(&manager->async_work_cond);
+    pthread_cond_init(&manager->async_drain_cond, NULL);
     manager->next_generation = 1;
+
+    /* VKD3D_JUICE_DESCRIPTOR_ASYNC: 0 disables the async worker entirely
+     * (synchronous flush behavior); any other value is the pending-entry
+     * threshold at which a batch is handed to the worker early. */
+    manager->async_threshold = VKD3D_PENDING_IMAGE_DESCRIPTOR_DEFAULT_ASYNC_THRESHOLD;
+    if (vkd3d_get_env_var("VKD3D_JUICE_DESCRIPTOR_ASYNC", env, sizeof(env)))
+        manager->async_threshold = strtoul(env, NULL, 0);
+
+    /* VKD3D_JUICE_DESCRIPTOR_ASYNC_TIMEOUT_MS: fire a partial batch this many
+     * ms after the first entry was enqueued. 0 disables timeout firing
+     * (batches then fire on threshold or at ExecuteCommandLists only). */
+    if (vkd3d_get_env_var("VKD3D_JUICE_DESCRIPTOR_ASYNC_TIMEOUT_MS", env, sizeof(env)))
+        timeout_ms = strtoul(env, NULL, 0);
+    manager->async_timeout_ns = (uint64_t)timeout_ms * 1000000u;
+
+    if (manager->async_threshold)
+    {
+        if (pthread_create(&manager->async_thread, NULL,
+                vkd3d_pending_image_descriptor_worker_main, device))
+        {
+            WARN("Failed to create pending image descriptor worker; using synchronous flush.\n");
+        }
+        else
+        {
+            manager->async_thread_active = true;
+            INFO("Async image descriptor materialization enabled: threshold %zu entries, timeout %lu ms.\n",
+                    manager->async_threshold, timeout_ms);
+        }
+    }
+    else
+        INFO("Async image descriptor materialization disabled by VKD3D_JUICE_DESCRIPTOR_ASYNC=0.\n");
+
     return S_OK;
+}
+
+static void vkd3d_pending_image_descriptor_update_has_work_locked(
+        struct vkd3d_pending_image_descriptor_manager *manager)
+{
+    vkd3d_atomic_uint32_store_explicit(&manager->has_work,
+            !!(manager->descriptor_count || manager->inflight_count),
+            vkd3d_memory_order_release);
+}
+
+/* Called with manager->mutex held after pending entries were added.
+ * Arms the timeout deadline on the empty -> non-empty transition and wakes
+ * the worker when the early-fire threshold is crossed. */
+static void vkd3d_pending_image_descriptor_notify_worker_locked(
+        struct vkd3d_pending_image_descriptor_manager *manager, size_t old_count)
+{
+    if (!manager->async_thread_active)
+        return;
+
+    if (!old_count && manager->descriptor_count)
+    {
+        manager->async_deadline_ns = vkd3d_get_current_time_ns() + manager->async_timeout_ns;
+        condvar_reltime_signal(&manager->async_work_cond);
+    }
+    else if (old_count < manager->async_threshold &&
+            manager->descriptor_count >= manager->async_threshold)
+    {
+        condvar_reltime_signal(&manager->async_work_cond);
+    }
 }
 
 static struct vkd3d_pending_image_descriptor_slot *vkd3d_pending_image_descriptor_get_slot_locked(
@@ -4771,9 +4841,9 @@ void vkd3d_pending_image_descriptor_invalidate(struct d3d12_device *device,
         }
     }
 
-    vkd3d_atomic_uint32_store_explicit(&manager->has_work,
-            !!manager->descriptor_count,
-            vkd3d_memory_order_release);
+    /* An in-flight entry for this VA is handled by the generation bump above:
+     * its late payload write will be discarded as stale. */
+    vkd3d_pending_image_descriptor_update_has_work_locked(manager);
     pthread_mutex_unlock(&manager->mutex);
     if (view)
         vkd3d_view_decref(view, device);
@@ -4789,6 +4859,7 @@ bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
     struct vkd3d_pending_image_descriptor *descriptor;
     struct vkd3d_view *old_view = NULL;
     VKD3D_REGION_DECL(pending_image_descriptor_enqueue);
+    size_t old_count;
     size_t i;
 
     if (!payload || !descriptor_size || descriptor_size > VKD3D_MAX_DESCRIPTOR_SIZE)
@@ -4799,6 +4870,7 @@ bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
 
     VKD3D_REGION_BEGIN(pending_image_descriptor_enqueue);
     pthread_mutex_lock(&manager->mutex);
+    old_count = manager->descriptor_count;
 
     if (!(slot = vkd3d_pending_image_descriptor_get_slot_locked(manager, descriptor_va, true)))
     {
@@ -4846,6 +4918,7 @@ bool vkd3d_enqueue_pending_image_descriptor(struct d3d12_device *device,
 
     vkd3d_atomic_uint32_store_explicit(
             &manager->has_work, 1, vkd3d_memory_order_release);
+    vkd3d_pending_image_descriptor_notify_worker_locked(manager, old_count);
     pthread_mutex_unlock(&manager->mutex);
     if (old_view)
         vkd3d_view_decref(old_view, device);
@@ -4873,6 +4946,37 @@ static struct vkd3d_pending_image_descriptor *vkd3d_pending_image_descriptor_fin
             if (descriptor_index)
                 *descriptor_index = i;
             return &manager->descriptors[i];
+        }
+    }
+
+    return NULL;
+}
+
+/* Finds a pending entry for the VA, also considering entries currently in
+ * flight on the async worker. The pending list is searched first since a
+ * re-enqueued VA has its newest entry there. An in-flight entry is only
+ * authoritative if its generation still matches the slot; otherwise its
+ * response will be discarded as stale and the raw payload copy semantics
+ * of CopyDescriptors apply. */
+static struct vkd3d_pending_image_descriptor *vkd3d_pending_image_descriptor_find_any_locked(
+        struct vkd3d_pending_image_descriptor_manager *manager,
+        vkd3d_cpu_descriptor_va_t descriptor_va)
+{
+    const struct vkd3d_pending_image_descriptor_slot *slot;
+    struct vkd3d_pending_image_descriptor *descriptor;
+    size_t i;
+
+    if ((descriptor = vkd3d_pending_image_descriptor_find_locked(manager, descriptor_va, NULL)))
+        return descriptor;
+
+    for (i = 0; i < manager->inflight_count; ++i)
+    {
+        if (manager->inflight_descriptors[i].descriptor_va == descriptor_va)
+        {
+            slot = vkd3d_pending_image_descriptor_get_slot_locked(manager, descriptor_va, false);
+            if (slot && slot->generation == manager->inflight_descriptors[i].generation)
+                return &manager->inflight_descriptors[i];
+            return NULL;
         }
     }
 
@@ -4913,14 +5017,16 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
     struct vkd3d_pending_image_descriptor *descriptor;
     struct vkd3d_pending_image_descriptor_slot *slot;
     size_t descriptor_index;
+    size_t old_count;
     size_t i;
 
     if (!descriptor_count)
         return true;
 
     pthread_mutex_lock(&manager->mutex);
+    old_count = manager->descriptor_count;
 
-    if (!manager->descriptor_count)
+    if (!manager->descriptor_count && !manager->inflight_count)
     {
         pthread_mutex_unlock(&manager->mutex);
         return true;
@@ -4948,8 +5054,8 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
         const vkd3d_cpu_descriptor_va_t current_src_va = src_va + i * descriptor_increment;
         const vkd3d_cpu_descriptor_va_t current_dst_va = dst_va + i * descriptor_increment;
 
-        if ((descriptor = vkd3d_pending_image_descriptor_find_locked(
-                manager, current_src_va, NULL)))
+        if ((descriptor = vkd3d_pending_image_descriptor_find_any_locked(
+                manager, current_src_va)))
         {
             copies[i].descriptor = *descriptor;
             copies[i].descriptor.descriptor_va = current_dst_va;
@@ -4995,9 +5101,8 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
     }
 
     manager->high_water_mark = max(manager->high_water_mark, manager->descriptor_count);
-    vkd3d_atomic_uint32_store_explicit(&manager->has_work,
-            !!manager->descriptor_count,
-            vkd3d_memory_order_release);
+    vkd3d_pending_image_descriptor_update_has_work_locked(manager);
+    vkd3d_pending_image_descriptor_notify_worker_locked(manager, old_count);
     pthread_mutex_unlock(&manager->mutex);
 
     for (i = 0; i < descriptor_count; ++i)
@@ -5042,69 +5147,19 @@ static void vkd3d_materialize_image_descriptors_fallback(struct d3d12_device *de
     VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_fallback, descriptor_count);
 }
 
-bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
-        enum vkd3d_pending_image_descriptor_flush_reason reason)
+/* Materializes a detached batch: issues the batched RPC (or the synchronous
+ * fallbacks) and applies the results into descriptor payloads under the
+ * per-slot generation checks. Runs without flush_mutex; safe to call from
+ * the async worker and from synchronous flushes. Does not decref views or
+ * free the batch array. */
+static void vkd3d_pending_image_descriptors_materialize_batch(struct d3d12_device *device,
+        struct vkd3d_pending_image_descriptor *descriptors, size_t descriptor_count)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
-    struct vkd3d_pending_image_descriptor *descriptors;
-    size_t descriptor_count;
     size_t begin;
     size_t chunk_index = 0;
-    VKD3D_REGION_DECL(pending_image_descriptor_materialize);
     VKD3D_REGION_DECL(pending_image_descriptor_batch_rpc);
-    VKD3D_REGION_DECL(pending_image_descriptor_flush_copy);
-    VKD3D_REGION_DECL(pending_image_descriptor_flush_execute);
-    VKD3D_REGION_DECL(pending_image_descriptor_flush_pre_submit);
-    VKD3D_REGION_DECL(pending_image_descriptor_flush_heap_teardown);
-    VKD3D_REGION_DECL(pending_image_descriptor_flush_device_teardown);
-
-    if (!vkd3d_atomic_uint32_load_explicit(
-            &manager->has_work, vkd3d_memory_order_acquire))
-        return true;
-
-    VKD3D_REGION_BEGIN(pending_image_descriptor_materialize);
-    pthread_mutex_lock(&manager->flush_mutex);
-    pthread_mutex_lock(&manager->mutex);
-
-    if (!manager->descriptor_count)
-    {
-        vkd3d_atomic_uint32_store_explicit(
-                &manager->has_work, 0, vkd3d_memory_order_release);
-        pthread_mutex_unlock(&manager->mutex);
-        pthread_mutex_unlock(&manager->flush_mutex);
-        VKD3D_REGION_END(pending_image_descriptor_materialize);
-        return true;
-    }
-
-    descriptors = manager->descriptors;
-    descriptor_count = manager->descriptor_count;
-    manager->descriptors = NULL;
-    manager->descriptor_count = 0;
-    manager->descriptor_capacity = 0;
-    pthread_mutex_unlock(&manager->mutex);
-
-    TRACE("Materializing %zu pending image descriptors, reason %u, high-water %zu.\n",
-            descriptor_count, reason, manager->high_water_mark);
-
-    switch (reason)
-    {
-        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS:
-            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_copy);
-            break;
-        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS:
-            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_execute);
-            break;
-        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT:
-            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_pre_submit);
-            break;
-        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN:
-            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_heap_teardown);
-            break;
-        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN:
-            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_device_teardown);
-            break;
-    }
 
     for (begin = 0; begin < descriptor_count;)
     {
@@ -5210,15 +5265,222 @@ bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
 
     TRACE("Pending image descriptor stale responses: %"PRIu64".\n",
             manager->stale_response_count);
+}
+
+/* Background materialization worker. Picks up pending batches when the
+ * early-fire threshold is crossed, the batch timeout expires, or an
+ * ExecuteCommandLists handoff requests it, and performs the blocking
+ * vkGetImageDescriptorsJUICE call off the application threads.
+ *
+ * Lock ordering: the worker only ever takes manager->mutex, never
+ * flush_mutex, so it can make progress while a synchronous flusher holds
+ * flush_mutex and waits on async_drain_cond. */
+static void *vkd3d_pending_image_descriptor_worker_main(void *arg)
+{
+    struct d3d12_device *device = arg;
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    VKD3D_REGION_DECL(pending_image_descriptor_async_batch);
+
+    vkd3d_set_thread_name("vkd3d_juice_desc");
 
     pthread_mutex_lock(&manager->mutex);
-    vkd3d_atomic_uint32_store_explicit(
-            &manager->has_work, !!manager->descriptor_count, vkd3d_memory_order_release);
+    while (!manager->async_stop)
+    {
+        struct vkd3d_pending_image_descriptor *batch;
+        size_t batch_count;
+        uint64_t now;
+        bool fire;
+        size_t i;
+
+        if (!manager->descriptor_count)
+        {
+            manager->async_fire_requested = false;
+            condvar_reltime_wait(&manager->async_work_cond, &manager->mutex);
+            continue;
+        }
+
+        if (manager->drain_waiter_count)
+        {
+            /* A synchronous flush is draining; it takes the remainder itself
+             * and signals us when it is done. */
+            condvar_reltime_wait(&manager->async_work_cond, &manager->mutex);
+            continue;
+        }
+
+        fire = manager->async_fire_requested ||
+                manager->descriptor_count >= manager->async_threshold;
+
+        if (!fire)
+        {
+            if (!manager->async_timeout_ns)
+            {
+                condvar_reltime_wait(&manager->async_work_cond, &manager->mutex);
+                continue;
+            }
+
+            now = vkd3d_get_current_time_ns();
+            if (now < manager->async_deadline_ns)
+            {
+                const uint64_t remaining_ms =
+                        (manager->async_deadline_ns - now + 999999) / 1000000;
+                condvar_reltime_wait_timeout_ms(&manager->async_work_cond,
+                        &manager->mutex, (unsigned int)max(remaining_ms, 1));
+                continue;
+            }
+            /* Deadline passed; fire the partial batch. */
+        }
+
+        batch = manager->descriptors;
+        batch_count = manager->descriptor_count;
+        manager->descriptors = NULL;
+        manager->descriptor_count = 0;
+        manager->descriptor_capacity = 0;
+        manager->inflight_descriptors = batch;
+        manager->inflight_count = batch_count;
+        manager->async_fire_requested = false;
+        ++manager->async_batch_count;
+        manager->async_entry_count += batch_count;
+        /* has_work stays raised while the batch is in flight so flushes
+         * still enter the drain path. */
+        pthread_mutex_unlock(&manager->mutex);
+
+        TRACE("Async materialization of %zu pending image descriptors.\n", batch_count);
+        VKD3D_REGION_BEGIN(pending_image_descriptor_async_batch);
+        vkd3d_pending_image_descriptors_materialize_batch(device, batch, batch_count);
+        VKD3D_REGION_END_ITERATIONS(pending_image_descriptor_async_batch, batch_count);
+
+        pthread_mutex_lock(&manager->mutex);
+        manager->inflight_descriptors = NULL;
+        manager->inflight_count = 0;
+        vkd3d_pending_image_descriptor_update_has_work_locked(manager);
+        pthread_cond_broadcast(&manager->async_drain_cond);
+        pthread_mutex_unlock(&manager->mutex);
+
+        for (i = 0; i < batch_count; ++i)
+            if (batch[i].view)
+                vkd3d_view_decref(batch[i].view, device);
+        vkd3d_free(batch);
+
+        pthread_mutex_lock(&manager->mutex);
+    }
+    pthread_mutex_unlock(&manager->mutex);
+    return NULL;
+}
+
+bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
+        enum vkd3d_pending_image_descriptor_flush_reason reason)
+{
+    struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
+    struct vkd3d_pending_image_descriptor *descriptors;
+    size_t descriptor_count;
+    uint64_t wait_start_ns;
+    size_t i;
+    VKD3D_REGION_DECL(pending_image_descriptor_materialize);
+    VKD3D_REGION_DECL(pending_image_descriptor_async_wait);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_copy);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_execute);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_pre_submit);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_heap_teardown);
+    VKD3D_REGION_DECL(pending_image_descriptor_flush_device_teardown);
+
+    if (!vkd3d_atomic_uint32_load_explicit(
+            &manager->has_work, vkd3d_memory_order_acquire))
+        return true;
+
+    if (manager->async_thread_active &&
+            reason == VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS)
+    {
+        /* Hand the current batch to the worker instead of blocking the
+         * application thread; the pre-submit flush on the submission thread
+         * waits for completion before vkQueueSubmit. */
+        VKD3D_REGION_BEGIN(pending_image_descriptor_flush_execute);
+        pthread_mutex_lock(&manager->mutex);
+        if (manager->descriptor_count)
+        {
+            manager->async_fire_requested = true;
+            ++manager->async_execute_handoff_count;
+            condvar_reltime_signal(&manager->async_work_cond);
+        }
+        pthread_mutex_unlock(&manager->mutex);
+        VKD3D_REGION_END(pending_image_descriptor_flush_execute);
+        return true;
+    }
+
+    VKD3D_REGION_BEGIN(pending_image_descriptor_materialize);
+
+    switch (reason)
+    {
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_COPY_DESCRIPTORS:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_copy);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_execute);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_pre_submit);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_heap_teardown);
+            break;
+        case VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN:
+            VKD3D_REGION_BEGIN(pending_image_descriptor_flush_device_teardown);
+            break;
+    }
+
+    pthread_mutex_lock(&manager->flush_mutex);
+    pthread_mutex_lock(&manager->mutex);
+
+    if (manager->inflight_count)
+    {
+        /* Wait for completion of batches already handed to the worker.
+         * drain_waiter_count keeps the worker from grabbing new batches
+         * underneath us so this converges. */
+        wait_start_ns = vkd3d_get_current_time_ns();
+        VKD3D_REGION_BEGIN(pending_image_descriptor_async_wait);
+        ++manager->drain_waiter_count;
+        while (manager->inflight_count)
+            pthread_cond_wait(&manager->async_drain_cond, &manager->mutex);
+        --manager->drain_waiter_count;
+        VKD3D_REGION_END(pending_image_descriptor_async_wait);
+
+        if (reason == VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT)
+        {
+            manager->presubmit_wait_ns += vkd3d_get_current_time_ns() - wait_start_ns;
+            ++manager->presubmit_wait_count;
+        }
+    }
+
+    descriptors = manager->descriptors;
+    descriptor_count = manager->descriptor_count;
+    manager->descriptors = NULL;
+    manager->descriptor_count = 0;
+    manager->descriptor_capacity = 0;
+    if (descriptor_count)
+    {
+        ++manager->sync_batch_count;
+        manager->sync_entry_count += descriptor_count;
+    }
     pthread_mutex_unlock(&manager->mutex);
 
-    for (begin = 0; begin < descriptor_count; ++begin)
-        if (descriptors[begin].view)
-            vkd3d_view_decref(descriptors[begin].view, device);
+    if (descriptor_count)
+    {
+        TRACE("Materializing %zu pending image descriptors, reason %u, high-water %zu.\n",
+                descriptor_count, reason, manager->high_water_mark);
+        vkd3d_pending_image_descriptors_materialize_batch(device, descriptors, descriptor_count);
+    }
+
+    pthread_mutex_lock(&manager->mutex);
+    vkd3d_pending_image_descriptor_update_has_work_locked(manager);
+    /* Entries enqueued while we were materializing were not picked up by
+     * this flush; the worker's wakeup for them may have been consumed while
+     * we were draining, so re-signal. */
+    if (manager->async_thread_active && manager->descriptor_count && !manager->async_stop)
+        condvar_reltime_signal(&manager->async_work_cond);
+    pthread_mutex_unlock(&manager->mutex);
+
+    for (i = 0; i < descriptor_count; ++i)
+        if (descriptors[i].view)
+            vkd3d_view_decref(descriptors[i].view, device);
     vkd3d_free(descriptors);
 
     pthread_mutex_unlock(&manager->flush_mutex);
@@ -5251,9 +5513,32 @@ void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device)
     struct vkd3d_pending_image_descriptor_manager *manager = &device->pending_image_descriptors;
     size_t i;
 
+    /* Stop the worker first. It always completes (applies and clears) its
+     * current in-flight batch before observing async_stop, so after the join
+     * there is no in-flight work and the teardown flush below fully drains. */
+    if (manager->async_thread_active)
+    {
+        pthread_mutex_lock(&manager->mutex);
+        manager->async_stop = true;
+        condvar_reltime_signal(&manager->async_work_cond);
+        pthread_mutex_unlock(&manager->mutex);
+        pthread_join(manager->async_thread, NULL);
+        manager->async_thread_active = false;
+    }
+
     if (device->vk_device)
         vkd3d_pending_image_descriptors_flush(
                 device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_DEVICE_TEARDOWN);
+
+    INFO("Pending image descriptors: async batches %"PRIu64" (%"PRIu64" entries), "
+            "execute handoffs %"PRIu64", sync batches %"PRIu64" (%"PRIu64" entries), "
+            "pre-submit waits %"PRIu64" totalling %.3f ms, stale responses %"PRIu64", "
+            "high-water %zu.\n",
+            manager->async_batch_count, manager->async_entry_count,
+            manager->async_execute_handoff_count,
+            manager->sync_batch_count, manager->sync_entry_count,
+            manager->presubmit_wait_count, (double)manager->presubmit_wait_ns * 1e-6,
+            manager->stale_response_count, manager->high_water_mark);
 
     for (i = 0; i < manager->descriptor_count; ++i)
         if (manager->descriptors[i].view)
@@ -5266,6 +5551,8 @@ void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device)
     manager->slot_count = 0;
     vkd3d_atomic_uint32_store_explicit(
             &manager->has_work, 0, vkd3d_memory_order_release);
+    pthread_cond_destroy(&manager->async_drain_cond);
+    condvar_reltime_destroy(&manager->async_work_cond);
     pthread_mutex_destroy(&manager->flush_mutex);
     pthread_mutex_destroy(&manager->mutex);
 }

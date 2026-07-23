@@ -5444,6 +5444,32 @@ struct vkd3d_pending_image_descriptor_manager
     size_t high_water_mark;
     uint64_t stale_response_count;
     uint32_t has_work;
+
+    /* Async materialization worker. All fields below are protected by
+     * mutex except where noted. The worker never takes flush_mutex. */
+    pthread_t async_thread;
+    condvar_reltime_t async_work_cond;
+    pthread_cond_t async_drain_cond;
+    struct vkd3d_pending_image_descriptor *inflight_descriptors;
+    size_t inflight_count;
+    size_t drain_waiter_count;
+    bool async_thread_active; /* Immutable after init. */
+    bool async_stop;
+    bool async_fire_requested;
+    uint64_t async_deadline_ns;
+
+    /* Tunables, immutable after init. */
+    size_t async_threshold;
+    uint64_t async_timeout_ns;
+
+    /* Telemetry. */
+    uint64_t async_batch_count;
+    uint64_t async_execute_handoff_count;
+    uint64_t sync_batch_count;
+    uint64_t async_entry_count;
+    uint64_t sync_entry_count;
+    uint64_t presubmit_wait_ns;
+    uint64_t presubmit_wait_count;
 };
 
 struct d3d12_device
