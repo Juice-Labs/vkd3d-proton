@@ -1196,6 +1196,7 @@ static const struct vkd3d_debug_option vkd3d_config_options[] =
     {"damage_not_zeroed_allocations", VKD3D_CONFIG_FLAG_DAMAGE_NOT_ZEROED_ALLOCATIONS},
     {"defer_resource_destruction", VKD3D_CONFIG_FLAG_DEFER_RESOURCE_DESTRUCTION},
     {"prefer_thin_uav_tiling", VKD3D_CONFIG_FLAG_PREFER_THIN_UAV_TILING},
+    {"descriptor_materialization", VKD3D_CONFIG_FLAG_DESCRIPTOR_MATERIALIZATION},
 };
 
 static void vkd3d_config_flags_init_once(void)
@@ -4315,6 +4316,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     size_t i, j;
 
     d3d_destruction_notifier_free(&device->destruction_notifier);
+    vkd3d_descriptor_journal_cleanup(device);
     vkd3d_pending_image_descriptors_cleanup(device);
 
     if (device->internal_sparse_queue)
@@ -6281,6 +6283,12 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 descriptor_heap_type);
     }
 
+    /* These inline copies bypass d3d12_desc_copy*, so lower them here. */
+    if ((descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+            descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) &&
+            d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_range(device, dst_descriptor_range_offset.ptr, descriptor_count);
+
     if (pending_copy_locked)
         d3d12_device_end_copy_pending_image_descriptors(device);
 }
@@ -6392,6 +6400,12 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 1, &src_descriptor_range_offset, &descriptor_count,
                 descriptor_heap_type);
     }
+
+    /* These inline copies bypass d3d12_desc_copy*, so lower them here. */
+    if ((descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+            descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) &&
+            d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_range(device, dst_descriptor_range_offset.ptr, descriptor_count);
 
     if (pending_copy_locked)
         d3d12_device_end_copy_pending_image_descriptors(device);
@@ -10259,6 +10273,9 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     if (FAILED(hr = vkd3d_pending_image_descriptors_init(device)))
         goto out_free_global_submission_mutex;
 
+    if (FAILED(hr = vkd3d_descriptor_journal_init(device)))
+        goto out_cleanup_pending_image_descriptors;
+
     spinlock_init(&device->low_latency_swapchain_spinlock);
 
     device->ID3D12DeviceExt_iface.lpVtbl = &d3d12_device_vkd3d_ext_vtbl;
@@ -10269,7 +10286,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     if ((rc = rwlock_init(&device->vertex_input_lock)))
     {
         hr = hresult_from_errno(rc);
-        goto out_cleanup_pending_image_descriptors;
+        goto out_cleanup_descriptor_journal;
     }
 
     if ((rc = rwlock_init(&device->fragment_output_lock)))
@@ -10301,6 +10318,10 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
 
     if (FAILED(hr = vkd3d_bindless_state_init(&device->bindless_state, device)))
         goto out_cleanup_global_descriptor_buffer;
+
+    /* Requires vk_procs (vkWriteDescriptorsJUICE) and bindless state
+     * (descriptor buffer + embedded mutable checks). */
+    vkd3d_descriptor_journal_post_init(device);
 
     if (FAILED(hr = vkd3d_view_map_init(&device->sampler_map.map)))
         goto out_cleanup_bindless_state;
@@ -10428,6 +10449,8 @@ out_free_fragment_output_lock:
     rwlock_destroy(&device->fragment_output_lock);
 out_free_vertex_input_lock:
     rwlock_destroy(&device->vertex_input_lock);
+out_cleanup_descriptor_journal:
+    vkd3d_descriptor_journal_cleanup(device);
 out_cleanup_pending_image_descriptors:
     vkd3d_pending_image_descriptors_cleanup(device);
 out_free_global_submission_mutex:

@@ -5270,6 +5270,487 @@ void vkd3d_pending_image_descriptors_cleanup(struct d3d12_device *device)
     pthread_mutex_destroy(&manager->mutex);
 }
 
+/* JUICE server-side descriptor materialization journal.
+ *
+ * Every write into a shader-visible descriptor heap payload allocation is
+ * recorded as an op:
+ *  - LITERAL: client-computable bytes (buffer/CBV/texel descriptors, null
+ *    payload bytes, sibling-plane null descriptors) copied out of the local
+ *    payload right after the existing write.
+ *  - IMAGE/SAMPLER: symbolic ops carrying the VkImageView/VkSampler handle;
+ *    the server resolves bytes locally via vkGetDescriptorEXT.
+ *  - NULL_TEMPLATE: one template payload replicated across a whole set plane
+ *    at heap creation.
+ * Ops flush in order as fire-and-forget vkWriteDescriptorsJUICE calls; the
+ * first non-verify call for an allocation flips it to server-authoritative
+ * inside the ICD. */
+
+#define VKD3D_DESCRIPTOR_JOURNAL_AUTO_FLUSH_THRESHOLD (16 * 1024)
+#define VKD3D_DESCRIPTOR_JOURNAL_MAX_WRITES_PER_CALL (4096u)
+
+HRESULT vkd3d_descriptor_journal_init(struct d3d12_device *device)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    int rc;
+
+    memset(journal, 0, sizeof(*journal));
+    if ((rc = pthread_mutex_init(&journal->mutex, NULL)))
+        return hresult_from_errno(rc);
+    if ((rc = pthread_mutex_init(&journal->flush_mutex, NULL)))
+    {
+        pthread_mutex_destroy(&journal->mutex);
+        return hresult_from_errno(rc);
+    }
+    return S_OK;
+}
+
+void vkd3d_descriptor_journal_post_init(struct d3d12_device *device)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    char env[8];
+
+    journal->enabled = false;
+    journal->verify = false;
+
+    if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_DESCRIPTOR_MATERIALIZATION))
+        return;
+
+    if (!device->vk_procs.vkWriteDescriptorsJUICE)
+    {
+        WARN("descriptor_materialization requested, but ICD does not expose vkWriteDescriptorsJUICE.\n");
+        return;
+    }
+    if (!d3d12_device_uses_descriptor_buffers(device))
+    {
+        WARN("descriptor_materialization requested, but descriptor buffers are not in use.\n");
+        return;
+    }
+    if (d3d12_device_use_embedded_mutable_descriptors(device))
+    {
+        WARN("descriptor_materialization requested, but embedded mutable descriptors are enabled.\n");
+        return;
+    }
+
+    journal->enabled = true;
+    if (vkd3d_get_env_var("JUICE_DESCRIPTOR_WRITE_VERIFY", env, sizeof(env)) &&
+            env[0] != '\0' && env[0] != '0')
+        journal->verify = true;
+
+    INFO("JUICE descriptor materialization enabled%s.\n", journal->verify ? " (verify mode)" : "");
+}
+
+void vkd3d_descriptor_journal_cleanup(struct d3d12_device *device)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    size_t i;
+
+    if (journal->enabled && device->vk_device)
+        vkd3d_descriptor_journal_flush(device);
+
+    for (i = 0; i < journal->entry_count; ++i)
+        if (journal->entries[i].view)
+            vkd3d_view_decref(journal->entries[i].view, device);
+    vkd3d_free(journal->entries);
+    vkd3d_free(journal->bytes);
+    journal->entries = NULL;
+    journal->entry_count = 0;
+    journal->bytes = NULL;
+    journal->byte_count = 0;
+    journal->enabled = false;
+    pthread_mutex_destroy(&journal->flush_mutex);
+    pthread_mutex_destroy(&journal->mutex);
+}
+
+/* Caller holds journal->mutex. */
+static struct vkd3d_descriptor_journal_entry *vkd3d_descriptor_journal_append_locked(
+        struct vkd3d_descriptor_journal *journal, VkDeviceMemory vk_memory, uint64_t memory_offset,
+        uint32_t op_type, VkDescriptorType vk_descriptor_type, uint32_t data_size)
+{
+    struct vkd3d_descriptor_journal_entry *entry;
+
+    if (!vkd3d_array_reserve((void **)&journal->entries, &journal->entry_capacity,
+            journal->entry_count + 1, sizeof(*journal->entries)))
+        return NULL;
+
+    entry = &journal->entries[journal->entry_count++];
+    entry->vk_memory = vk_memory;
+    entry->memory_offset = memory_offset;
+    entry->op_type = op_type;
+    entry->vk_descriptor_type = vk_descriptor_type;
+    entry->vk_image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    entry->data_size = data_size;
+    entry->repeat_count = 1;
+    entry->view = NULL;
+    entry->byte_offset = 0;
+    return entry;
+}
+
+/* Caller holds journal->mutex. Returns false on allocation failure (the
+ * pending entry must then be popped by the caller). */
+static bool vkd3d_descriptor_journal_append_bytes_locked(struct vkd3d_descriptor_journal *journal,
+        struct vkd3d_descriptor_journal_entry *entry, const void *data, size_t size)
+{
+    if (!vkd3d_array_reserve((void **)&journal->bytes, &journal->byte_capacity,
+            journal->byte_count + size, sizeof(*journal->bytes)))
+        return false;
+
+    entry->byte_offset = journal->byte_count;
+    memcpy(journal->bytes + journal->byte_count, data, size);
+    journal->byte_count += size;
+    return true;
+}
+
+static size_t vkd3d_descriptor_journal_symbolic_size(struct d3d12_device *device,
+        VkDescriptorType vk_descriptor_type)
+{
+    const VkPhysicalDeviceDescriptorBufferPropertiesEXT *props =
+            &device->device_info.descriptor_buffer_properties;
+
+    switch (vk_descriptor_type)
+    {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+            return props->samplerDescriptorSize;
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            return props->sampledImageDescriptorSize;
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            return props->storageImageDescriptorSize;
+        default:
+            return 0;
+    }
+}
+
+static void vkd3d_descriptor_journal_maybe_flush(struct d3d12_device *device)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    bool need_flush;
+
+    pthread_mutex_lock(&journal->mutex);
+    need_flush = journal->entry_count >= VKD3D_DESCRIPTOR_JOURNAL_AUTO_FLUSH_THRESHOLD;
+    pthread_mutex_unlock(&journal->mutex);
+
+    if (need_flush)
+        vkd3d_descriptor_journal_flush(device);
+}
+
+/* Emits journal ops reproducing the current contents of one descriptor slot
+ * on a shader-visible heap: a symbolic op for the image/sampler plane (whose
+ * local payload bytes are not authoritative) and literal ops for every other
+ * plane the slot writes. */
+void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const struct d3d12_desc_split *d)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    struct d3d12_descriptor_heap *heap = d->heap;
+    struct vkd3d_descriptor_journal_entry *entry;
+    uint32_t image_set_index = UINT32_MAX;
+    const uint8_t *base;
+    struct vkd3d_view *view;
+    uint32_t mask;
+    uint8_t flags;
+
+    if (!journal->enabled)
+        return;
+    if (!(heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        return;
+    if (!heap->descriptor_buffer.host_allocation ||
+            heap->descriptor_buffer.device_allocation.vk_memory == VK_NULL_HANDLE)
+        return;
+
+    base = heap->descriptor_buffer.host_allocation;
+    flags = d->view->info.flags;
+    view = (flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW) ? d->view->info.image.view : NULL;
+
+    pthread_mutex_lock(&journal->mutex);
+
+    if ((flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW) &&
+            (!view || view->type == VKD3D_VIEW_TYPE_IMAGE || view->type == VKD3D_VIEW_TYPE_SAMPLER))
+    {
+        /* Create paths store the plane holding the image/sampler payload in
+         * single_binding even when the slot spans multiple planes. A NULL
+         * view (failed view creation) becomes a symbolic op with a null
+         * handle; the server resolves it to a null descriptor. */
+        VkDescriptorType vk_descriptor_type = (VkDescriptorType)d->view->info.image.vk_descriptor_type;
+        const uint8_t *payload;
+        size_t size;
+
+        image_set_index = d->types->single_binding.set;
+        size = vkd3d_descriptor_journal_symbolic_size(device, vk_descriptor_type);
+        payload = (const uint8_t *)d3d12_descriptor_heap_get_mapped_payload(heap, image_set_index, d->offset);
+
+        if (size)
+        {
+            entry = vkd3d_descriptor_journal_append_locked(journal,
+                    heap->descriptor_buffer.device_allocation.vk_memory,
+                    (uint64_t)(payload - base),
+                    vk_descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ?
+                            VKD3D_DESCRIPTOR_JOURNAL_OP_SAMPLER : VKD3D_DESCRIPTOR_JOURNAL_OP_IMAGE,
+                    vk_descriptor_type, (uint32_t)size);
+            if (entry)
+            {
+                entry->vk_image_layout = (VkImageLayout)d->view->info.image.vk_image_layout;
+                entry->view = view;
+                if (view)
+                    vkd3d_view_incref(view);
+            }
+        }
+        else
+        {
+            WARN("Unexpected symbolic descriptor type %u; skipping journal op.\n", vk_descriptor_type);
+            image_set_index = UINT32_MAX;
+        }
+    }
+
+    /* All other planes hold client-computed bytes; replay them literally. */
+    mask = d->types->set_info_mask;
+    while (mask)
+    {
+        unsigned int set_info_index = vkd3d_bitmask_iter32(&mask);
+        uint32_t set_index = device->bindless_state.set_info[set_info_index].set_index;
+        const uint8_t *payload;
+        size_t stride;
+
+        if (set_index == image_set_index)
+            continue;
+
+        stride = heap->sets[set_index].stride;
+        if (!stride || !heap->sets[set_index].mapped_set)
+            continue;
+
+        payload = (const uint8_t *)d3d12_descriptor_heap_get_mapped_payload(heap, set_index, d->offset);
+        entry = vkd3d_descriptor_journal_append_locked(journal,
+                heap->descriptor_buffer.device_allocation.vk_memory,
+                (uint64_t)(payload - base),
+                VKD3D_DESCRIPTOR_JOURNAL_OP_LITERAL,
+                device->bindless_state.set_info[set_info_index].vk_descriptor_type,
+                (uint32_t)stride);
+        if (entry && !vkd3d_descriptor_journal_append_bytes_locked(journal, entry, payload, stride))
+            --journal->entry_count;
+    }
+
+    vkd3d_atomic_uint32_store_explicit(&journal->has_work,
+            !!journal->entry_count, vkd3d_memory_order_release);
+    pthread_mutex_unlock(&journal->mutex);
+
+    vkd3d_descriptor_journal_maybe_flush(device);
+}
+
+void vkd3d_descriptor_journal_note_slot(struct d3d12_device *device, vkd3d_cpu_descriptor_va_t desc_va)
+{
+    struct d3d12_desc_split d;
+
+    if (!device->descriptor_journal.enabled)
+        return;
+
+    d = d3d12_desc_decode_va(desc_va);
+    vkd3d_descriptor_journal_note_split(device, &d);
+}
+
+void vkd3d_descriptor_journal_note_range(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, unsigned int count)
+{
+    struct d3d12_desc_split d;
+    struct d3d12_desc_split iter;
+    unsigned int i;
+
+    if (!device->descriptor_journal.enabled || !count)
+        return;
+
+    d = d3d12_desc_decode_va(dst_va);
+    if (!(d.heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        return;
+
+    for (i = 0; i < count; ++i)
+    {
+        iter.heap = d.heap;
+        iter.types = d.types + i;
+        iter.view = d.view + i;
+        iter.offset = d.offset + i;
+        vkd3d_descriptor_journal_note_split(device, &iter);
+    }
+}
+
+/* Replays the heap-creation null fill: one NULL_TEMPLATE op per set plane,
+ * replicated descriptor_count times server-side. */
+void vkd3d_descriptor_journal_note_heap_init(struct d3d12_descriptor_heap *heap,
+        const uint8_t * const *null_payloads, const size_t *null_payload_offsets,
+        const size_t *null_payload_sizes, unsigned int set_count, size_t descriptor_count)
+{
+    struct d3d12_device *device = heap->device;
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    struct vkd3d_descriptor_journal_entry *entry;
+    unsigned int i;
+
+    if (!journal->enabled || !descriptor_count)
+        return;
+    if (!(heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        return;
+    if (heap->descriptor_buffer.device_allocation.vk_memory == VK_NULL_HANDLE)
+        return;
+
+    pthread_mutex_lock(&journal->mutex);
+    for (i = 0; i < set_count; ++i)
+    {
+        if (!null_payloads[i] || !null_payload_sizes[i])
+            continue;
+
+        entry = vkd3d_descriptor_journal_append_locked(journal,
+                heap->descriptor_buffer.device_allocation.vk_memory,
+                (uint64_t)null_payload_offsets[i],
+                VKD3D_DESCRIPTOR_JOURNAL_OP_NULL_TEMPLATE,
+                VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                (uint32_t)null_payload_sizes[i]);
+        if (entry)
+        {
+            entry->repeat_count = (uint32_t)descriptor_count;
+            if (!vkd3d_descriptor_journal_append_bytes_locked(journal, entry,
+                    null_payloads[i], null_payload_sizes[i]))
+                --journal->entry_count;
+        }
+    }
+    vkd3d_atomic_uint32_store_explicit(&journal->has_work,
+            !!journal->entry_count, vkd3d_memory_order_release);
+    pthread_mutex_unlock(&journal->mutex);
+}
+
+/* Literal bytes at an arbitrary offset inside the payload allocation
+ * (heap-creation extra bindings). */
+void vkd3d_descriptor_journal_note_raw_literal(struct d3d12_device *device,
+        struct d3d12_descriptor_heap *heap, const void *host_ptr, size_t size)
+{
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    struct vkd3d_descriptor_journal_entry *entry;
+    const uint8_t *base;
+
+    if (!journal->enabled || !size)
+        return;
+    if (!(heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        return;
+    if (!heap->descriptor_buffer.host_allocation ||
+            heap->descriptor_buffer.device_allocation.vk_memory == VK_NULL_HANDLE)
+        return;
+
+    base = heap->descriptor_buffer.host_allocation;
+
+    pthread_mutex_lock(&journal->mutex);
+    entry = vkd3d_descriptor_journal_append_locked(journal,
+            heap->descriptor_buffer.device_allocation.vk_memory,
+            (uint64_t)((const uint8_t *)host_ptr - base),
+            VKD3D_DESCRIPTOR_JOURNAL_OP_LITERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)size);
+    if (entry && !vkd3d_descriptor_journal_append_bytes_locked(journal, entry, host_ptr, size))
+        --journal->entry_count;
+    vkd3d_atomic_uint32_store_explicit(&journal->has_work,
+            !!journal->entry_count, vkd3d_memory_order_release);
+    pthread_mutex_unlock(&journal->mutex);
+}
+
+bool vkd3d_descriptor_journal_flush(struct d3d12_device *device)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    struct vkd3d_descriptor_journal *journal = &device->descriptor_journal;
+    struct vkd3d_descriptor_journal_entry *entries;
+    VkDescriptorWriteJUICE *writes;
+    size_t entry_count;
+    uint8_t *bytes;
+    size_t begin;
+    size_t i;
+
+    if (!journal->enabled)
+        return true;
+    if (!vkd3d_atomic_uint32_load_explicit(&journal->has_work, vkd3d_memory_order_acquire))
+        return true;
+
+    pthread_mutex_lock(&journal->flush_mutex);
+    pthread_mutex_lock(&journal->mutex);
+
+    if (!journal->entry_count)
+    {
+        vkd3d_atomic_uint32_store_explicit(&journal->has_work, 0, vkd3d_memory_order_release);
+        pthread_mutex_unlock(&journal->mutex);
+        pthread_mutex_unlock(&journal->flush_mutex);
+        return true;
+    }
+
+    entries = journal->entries;
+    entry_count = journal->entry_count;
+    bytes = journal->bytes;
+    journal->entries = NULL;
+    journal->entry_count = 0;
+    journal->entry_capacity = 0;
+    journal->bytes = NULL;
+    journal->byte_count = 0;
+    journal->byte_capacity = 0;
+    vkd3d_atomic_uint32_store_explicit(&journal->has_work, 0, vkd3d_memory_order_release);
+    pthread_mutex_unlock(&journal->mutex);
+
+    TRACE("Flushing %zu descriptor journal ops.\n", entry_count);
+
+    writes = vkd3d_malloc(min(entry_count, (size_t)VKD3D_DESCRIPTOR_JOURNAL_MAX_WRITES_PER_CALL) *
+            sizeof(*writes));
+
+    /* Ops must apply in recorded order; batch consecutive runs targeting the
+     * same VkDeviceMemory into one call. */
+    for (begin = 0; writes && begin < entry_count;)
+    {
+        VkDeviceMemory vk_memory = entries[begin].vk_memory;
+        size_t chunk_count = 0;
+        VkResult vr;
+
+        while (begin + chunk_count < entry_count &&
+                chunk_count < VKD3D_DESCRIPTOR_JOURNAL_MAX_WRITES_PER_CALL &&
+                entries[begin + chunk_count].vk_memory == vk_memory)
+            ++chunk_count;
+
+        for (i = 0; i < chunk_count; ++i)
+        {
+            const struct vkd3d_descriptor_journal_entry *entry = &entries[begin + i];
+            VkDescriptorWriteJUICE *write = &writes[i];
+
+            write->memoryOffset = entry->memory_offset;
+            write->opType = entry->op_type;
+            write->descriptorType = entry->vk_descriptor_type;
+            write->imageLayout = entry->vk_image_layout;
+            write->dataSize = entry->data_size;
+            write->repeatCount = entry->repeat_count;
+            if (entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_IMAGE)
+            {
+                write->handle = entry->view ? (uint64_t)(uintptr_t)entry->view->vk_image_view : 0;
+                write->pData = NULL;
+            }
+            else if (entry->op_type == VKD3D_DESCRIPTOR_JOURNAL_OP_SAMPLER)
+            {
+                write->handle = entry->view ? (uint64_t)(uintptr_t)entry->view->vk_sampler : 0;
+                write->pData = NULL;
+            }
+            else
+            {
+                write->handle = 0;
+                write->pData = bytes + entry->byte_offset;
+            }
+        }
+
+        vr = VK_CALL(vkWriteDescriptorsJUICE(device->vk_device, vk_memory,
+                journal->verify ? VK_DESCRIPTOR_WRITE_VERIFY_BIT_JUICE : 0u,
+                (uint32_t)chunk_count, writes));
+        if (vr != VK_SUCCESS)
+            WARN("vkWriteDescriptorsJUICE failed with %d (%zu ops).\n", vr, chunk_count);
+
+        begin += chunk_count;
+    }
+
+    if (!writes)
+        ERR("Failed to allocate descriptor write batch; dropping %zu ops.\n", entry_count);
+
+    for (i = 0; i < entry_count; ++i)
+        if (entries[i].view)
+            vkd3d_view_decref(entries[i].view, device);
+    vkd3d_free(writes);
+    vkd3d_free(entries);
+    vkd3d_free(bytes);
+
+    pthread_mutex_unlock(&journal->flush_mutex);
+    return true;
+}
+
 void d3d12_desc_copy_single(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
         struct d3d12_device *device)
 {
@@ -5369,6 +5850,9 @@ void d3d12_desc_copy_single(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descript
 
     *dst.types = *src.types;
     *dst.view = *src.view;
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &dst);
 }
 
 void d3d12_desc_copy_range(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t src_va,
@@ -5439,6 +5923,9 @@ void d3d12_desc_copy_range(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descripto
 
     if (copy_count)
         VK_CALL(vkUpdateDescriptorSets(device->vk_device, 0, NULL, copy_count, vk_copies));
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_range(device, dst_va, count);
 }
 
 /* Accumulating version of d3d12_desc_copy_range that doesn't call vkUpdateDescriptorSets immediately.
@@ -5516,6 +6003,9 @@ static bool d3d12_desc_copy_range_accumulate(vkd3d_cpu_descriptor_va_t dst_va, v
             memcpy(dst_ranges + dst.offset, src_ranges + src.offset, sizeof(*dst_ranges) * count);
         }
     }
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_range(device, dst_va, count);
 
     *copy_count_inout = copy_count;
     return true;
@@ -6321,6 +6811,9 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
                     VKD3D_DESCRIPTOR_QA_TYPE_STORAGE_TEXEL_BUFFER_BIT |
                     VKD3D_DESCRIPTOR_QA_TYPE_RAW_VA_BIT |
                     VKD3D_DESCRIPTOR_QA_TYPE_RT_ACCELERATION_STRUCTURE_BIT, vkd3d_null_cookie());
+
+    if (d3d12_device_use_descriptor_materialization(desc.heap->device))
+        vkd3d_descriptor_journal_note_split(desc.heap->device, &desc);
 }
 
 void d3d12_desc_create_cbv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
@@ -6548,6 +7041,9 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
                     VKD3D_DESCRIPTOR_QA_TYPE_UNIFORM_BUFFER_BIT :
                     VKD3D_DESCRIPTOR_QA_TYPE_STORAGE_BUFFER_BIT,
             d.view->qa_cookie);
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 static unsigned int vkd3d_view_flags_from_d3d12_buffer_srv_flags(D3D12_BUFFER_SRV_FLAGS flags)
@@ -7044,6 +7540,9 @@ static void vkd3d_create_buffer_srv(vkd3d_cpu_descriptor_va_t desc_va,
 
     if (vk_write_count)
         VK_CALL(vkUpdateDescriptorSets(device->vk_device, vk_write_count, vk_write, 0, NULL));
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 static void vkd3d_texture_view_desc_fixup(struct d3d12_device *device, struct vkd3d_texture_view_desc *desc)
@@ -7361,6 +7860,8 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
 
     d.view->info.image.view = view;
     d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL;
+    d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    d.view->info.image.vk_image_layout = (uint32_t)descriptor_info.image.imageLayout;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
@@ -7372,7 +7873,12 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.data.pSampledImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
         descriptor_size = device->device_info.descriptor_buffer_properties.sampledImageDescriptorSize;
-        if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
+        if (d3d12_device_use_descriptor_materialization(device))
+        {
+            /* The server materializes the bytes from the journal op emitted at
+             * the end of this function; no local payload write or RPC. */
+        }
+        else if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
                 VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
         {
             VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_srv);
@@ -7437,6 +7943,9 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
     vkd3d_descriptor_debug_write_descriptor(d.heap->descriptor_heap_info.host_ptr,
             d.heap->cookie, d.offset,
             VKD3D_DESCRIPTOR_QA_TYPE_SAMPLED_IMAGE_BIT, d.view->qa_cookie);
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 void d3d12_desc_create_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
@@ -7892,6 +8401,9 @@ static void vkd3d_create_buffer_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3
             descriptor_qa_flags, d.view->qa_cookie);
 
     VK_CALL(vkUpdateDescriptorSets(device->vk_device, vk_write_count, vk_write, 0, NULL));
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 static void vkd3d_create_texture_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va,
@@ -7995,6 +8507,8 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
 
     d.view->info.image.view = view;
     d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW | VKD3D_DESCRIPTOR_FLAG_NON_NULL;
+    d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    d.view->info.image.vk_image_layout = (uint32_t)descriptor_info.image.imageLayout;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
@@ -8006,7 +8520,12 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
         get_info.data.pStorageImage = &descriptor_info.image;
         payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
         descriptor_size = device->device_info.descriptor_buffer_properties.storageImageDescriptorSize;
-        if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
+        if (d3d12_device_use_descriptor_materialization(device))
+        {
+            /* The server materializes the bytes from the journal op emitted at
+             * the end of this function; no local payload write or RPC. */
+        }
+        else if (!vkd3d_enqueue_pending_image_descriptor(device, desc_va, payload, view,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptor_info.image.imageLayout, descriptor_size))
         {
             VKD3D_REGION_BEGIN(vkGetDescriptorEXT_texture_uav);
@@ -8071,6 +8590,9 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
     vkd3d_descriptor_debug_write_descriptor(d.heap->descriptor_heap_info.host_ptr,
             d.heap->cookie, d.offset,
             VKD3D_DESCRIPTOR_QA_TYPE_STORAGE_IMAGE_BIT, d.view->qa_cookie);
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 void d3d12_desc_create_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, struct d3d12_device *device,
@@ -8532,21 +9054,33 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
     d.view->info.image.flags = VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW |
             VKD3D_DESCRIPTOR_FLAG_NON_NULL |
             VKD3D_DESCRIPTOR_FLAG_SINGLE_DESCRIPTOR;
+    d.view->info.image.vk_descriptor_type = (uint8_t)VK_DESCRIPTOR_TYPE_SAMPLER;
+    d.view->info.image.vk_image_layout = (uint32_t)VK_IMAGE_LAYOUT_UNDEFINED;
     d.types->set_info_mask = 1u << info_index;
     d.types->single_binding = binding;
 
     if (d3d12_device_uses_descriptor_buffers(device))
     {
-        get_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
-        get_info.pNext = NULL;
-        get_info.type = VK_DESCRIPTOR_TYPE_SAMPLER;
-        get_info.data.pSampler = &view->vk_sampler;
-        payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
-        VKD3D_REGION_BEGIN(vkGetDescriptorEXT_sampler);
-        VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
-                device->device_info.descriptor_buffer_properties.samplerDescriptorSize,
-                payload));
-        VKD3D_REGION_END(vkGetDescriptorEXT_sampler);
+        if (d3d12_device_use_descriptor_materialization(device))
+        {
+            /* Sampler descriptor bytes are opaque server bytes; skip the
+             * blocking fetch entirely. Shader-visible slots get a symbolic op
+             * below; non-shader-visible slots only serve as copy sources and
+             * copies are lowered from metadata. */
+        }
+        else
+        {
+            get_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
+            get_info.pNext = NULL;
+            get_info.type = VK_DESCRIPTOR_TYPE_SAMPLER;
+            get_info.data.pSampler = &view->vk_sampler;
+            payload = d3d12_descriptor_heap_get_mapped_payload(d.heap, binding.set, d.offset);
+            VKD3D_REGION_BEGIN(vkGetDescriptorEXT_sampler);
+            VK_CALL(vkGetDescriptorEXT(device->vk_device, &get_info,
+                    device->device_info.descriptor_buffer_properties.samplerDescriptorSize,
+                    payload));
+            VKD3D_REGION_END(vkGetDescriptorEXT_sampler);
+        }
     }
     else
     {
@@ -8562,6 +9096,9 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
     vkd3d_descriptor_debug_write_descriptor(d.heap->descriptor_heap_info.host_ptr,
             d.heap->cookie, d.offset,
             VKD3D_DESCRIPTOR_QA_TYPE_SAMPLER_BIT, d.view->qa_cookie);
+
+    if (d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_note_split(device, &d);
 }
 
 /* RTVs */
@@ -9115,6 +9652,13 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_buffer(struct d3d12_descr
         }
     }
 
+    if (d3d12_device_use_descriptor_materialization(device))
+    {
+        vkd3d_descriptor_journal_note_heap_init(descriptor_heap,
+                src_null_payloads, src_null_payload_offsets, src_null_payload_sizes,
+                set_count, descriptor_count);
+    }
+
     return S_OK;
 }
 
@@ -9551,6 +10095,12 @@ static void d3d12_descriptor_heap_update_extra_bindings(struct d3d12_descriptor_
                         device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
                         host_ptr));
                 VKD3D_REGION_END(vkGetDescriptorEXT_descriptor_heap_extra_binding);
+
+                if (d3d12_device_use_descriptor_materialization(device))
+                {
+                    vkd3d_descriptor_journal_note_raw_literal(device, descriptor_heap, host_ptr,
+                            device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize);
+                }
             }
             else
                 write_count += 1;
@@ -9722,6 +10272,13 @@ static HRESULT d3d12_descriptor_heap_init(struct d3d12_descriptor_heap *descript
 
     if (desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
         d3d12_descriptor_heap_update_extra_bindings(descriptor_heap, device);
+
+    /* Ship the initial heap state (null fill + extra bindings) right away so
+     * the ICD flips the payload allocation to server-authoritative before the
+     * client dirty-syncs any of it. */
+    if ((desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+            d3d12_device_use_descriptor_materialization(device))
+        vkd3d_descriptor_journal_flush(device);
 
     if (FAILED(hr = vkd3d_private_store_init(&descriptor_heap->private_store)))
         goto fail;
@@ -9963,6 +10520,12 @@ void d3d12_descriptor_heap_cleanup(struct d3d12_descriptor_heap *descriptor_heap
     if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
         vkd3d_pending_image_descriptors_flush(
                 device, VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_HEAP_TEARDOWN);
+
+    /* Flush outstanding journal ops before the heap's payload memory is
+     * freed; the ops must precede the free in the command stream. */
+    if (d3d12_device_use_descriptor_materialization(device) &&
+            (descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        vkd3d_descriptor_journal_flush(device);
 
 #ifndef VKD3D_NO_TRACE_MESSAGES
     if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||

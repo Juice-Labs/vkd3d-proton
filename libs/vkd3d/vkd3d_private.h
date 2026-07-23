@@ -1413,6 +1413,13 @@ struct vkd3d_descriptor_metadata_buffer_view
 struct vkd3d_descriptor_metadata_image_view
 {
     uint8_t flags;
+    /* JUICE descriptor materialization: identity of the opaque payload bytes
+     * so descriptor copies can be lowered to symbolic server-side ops.
+     * Packed into what used to be struct padding. Valid VkDescriptorType
+     * values here (SAMPLER/SAMPLED_IMAGE/STORAGE_IMAGE) all fit in 8 bits. */
+    uint8_t vk_descriptor_type;
+    uint16_t padding;
+    uint32_t vk_image_layout; /* VkImageLayout used when creating the descriptor. */
     struct vkd3d_view *view;
 };
 
@@ -1457,6 +1464,28 @@ bool vkd3d_pending_image_descriptors_copy_locked(struct d3d12_device *device,
         unsigned int descriptor_count, unsigned int descriptor_increment);
 bool vkd3d_pending_image_descriptors_flush(struct d3d12_device *device,
         enum vkd3d_pending_image_descriptor_flush_reason reason);
+
+/* JUICE server-side descriptor materialization journal.
+ * Records descriptor-write ops against shader-visible heap payload memory and
+ * flushes them as fire-and-forget vkWriteDescriptorsJUICE calls. Enabled with
+ * VKD3D_CONFIG=descriptor_materialization when the ICD exposes
+ * vkWriteDescriptorsJUICE, descriptor buffers are in use, and embedded
+ * mutable descriptors are disabled. */
+struct d3d12_descriptor_heap;
+struct d3d12_desc_split;
+HRESULT vkd3d_descriptor_journal_init(struct d3d12_device *device);
+void vkd3d_descriptor_journal_post_init(struct d3d12_device *device);
+void vkd3d_descriptor_journal_cleanup(struct d3d12_device *device);
+void vkd3d_descriptor_journal_note_slot(struct d3d12_device *device, vkd3d_cpu_descriptor_va_t desc_va);
+void vkd3d_descriptor_journal_note_split(struct d3d12_device *device, const struct d3d12_desc_split *split);
+void vkd3d_descriptor_journal_note_range(struct d3d12_device *device,
+        vkd3d_cpu_descriptor_va_t dst_va, unsigned int count);
+void vkd3d_descriptor_journal_note_heap_init(struct d3d12_descriptor_heap *heap,
+        const uint8_t * const *null_payloads, const size_t *null_payload_offsets,
+        const size_t *null_payload_sizes, unsigned int set_count, size_t descriptor_count);
+void vkd3d_descriptor_journal_note_raw_literal(struct d3d12_device *device,
+        struct d3d12_descriptor_heap *heap, const void *host_ptr, size_t size);
+bool vkd3d_descriptor_journal_flush(struct d3d12_device *device);
 
 void d3d12_desc_copy(vkd3d_cpu_descriptor_va_t dst, vkd3d_cpu_descriptor_va_t src,
         unsigned int count, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, struct d3d12_device *device);
@@ -5446,6 +5475,49 @@ struct vkd3d_pending_image_descriptor_manager
     uint32_t has_work;
 };
 
+enum vkd3d_descriptor_journal_op_type
+{
+    /* Values match VkDescriptorWriteOpTypeJUICE. */
+    VKD3D_DESCRIPTOR_JOURNAL_OP_LITERAL = 0,
+    VKD3D_DESCRIPTOR_JOURNAL_OP_IMAGE = 1,
+    VKD3D_DESCRIPTOR_JOURNAL_OP_SAMPLER = 2,
+    VKD3D_DESCRIPTOR_JOURNAL_OP_NULL_TEMPLATE = 3,
+};
+
+struct vkd3d_descriptor_journal_entry
+{
+    VkDeviceMemory vk_memory;
+    uint64_t memory_offset;
+    uint32_t op_type;
+    VkDescriptorType vk_descriptor_type;
+    VkImageLayout vk_image_layout;
+    uint32_t data_size;
+    uint32_t repeat_count;
+    /* Ref held for IMAGE/SAMPLER ops until the entry is flushed, so the
+     * client handle stays valid until the op has been serialized ahead of
+     * any destroy. */
+    struct vkd3d_view *view;
+    /* Offset into the journal byte arena for LITERAL/NULL_TEMPLATE ops. */
+    size_t byte_offset;
+};
+
+struct vkd3d_descriptor_journal
+{
+    pthread_mutex_t mutex;
+    pthread_mutex_t flush_mutex;
+    struct vkd3d_descriptor_journal_entry *entries;
+    size_t entry_count;
+    size_t entry_capacity;
+    uint8_t *bytes;
+    size_t byte_count;
+    size_t byte_capacity;
+    uint32_t has_work;
+    bool enabled;
+    /* Verify mode: ops carry VK_DESCRIPTOR_WRITE_VERIFY_BIT_JUICE, the client
+     * keeps dirty-page sync and the server compares instead of applying. */
+    bool verify;
+};
+
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
@@ -5464,6 +5536,7 @@ struct d3d12_device
     pthread_mutex_t global_submission_mutex;
     spinlock_t low_latency_swapchain_spinlock;
     struct vkd3d_pending_image_descriptor_manager pending_image_descriptors;
+    struct vkd3d_descriptor_journal descriptor_journal;
 
     VkPhysicalDeviceMemoryProperties memory_properties;
 
@@ -5611,6 +5684,11 @@ void d3d12_device_return_descriptor_heap_gpu_va(struct d3d12_device *device, uin
 static inline bool d3d12_device_uses_descriptor_buffers(const struct d3d12_device *device)
 {
     return device->global_descriptor_buffer.resource.va != 0;
+}
+
+static inline bool d3d12_device_use_descriptor_materialization(const struct d3d12_device *device)
+{
+    return device->descriptor_journal.enabled;
 }
 
 static inline bool is_cpu_accessible_heap(const D3D12_HEAP_PROPERTIES *properties)

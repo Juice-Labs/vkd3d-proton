@@ -20354,6 +20354,9 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
     vkd3d_pending_image_descriptors_flush(command_queue->device,
             VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_EXECUTE_COMMAND_LISTS);
 
+    if (d3d12_device_use_descriptor_materialization(command_queue->device))
+        vkd3d_descriptor_journal_flush(command_queue->device);
+
     if (FAILED(hr = vkd3d_memory_transfer_queue_flush(&command_queue->device->memory_transfers)))
     {
         d3d12_device_mark_as_removed(command_queue->device, hr,
@@ -21904,6 +21907,9 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
 
     vkd3d_pending_image_descriptors_flush(command_queue->device,
             VKD3D_PENDING_IMAGE_DESCRIPTOR_FLUSH_PRE_SUBMIT);
+
+    if (d3d12_device_use_descriptor_materialization(command_queue->device))
+        vkd3d_descriptor_journal_flush(command_queue->device);
 
     if (!(vk_queue = vkd3d_queue_acquire(vkd3d_queue)))
     {

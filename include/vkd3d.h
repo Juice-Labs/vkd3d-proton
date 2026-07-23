@@ -118,6 +118,10 @@ extern "C" {
 #define VKD3D_CONFIG_FLAG_DEFER_RESOURCE_DESTRUCTION (1ull << 60)
 #define VKD3D_CONFIG_FLAG_PREFER_THIN_UAV_TILING (1ull << 61)
 #define VKD3D_CONFIG_FLAG_EXTENDED_DEBUG_UTILS (1ull << 62)
+/* JUICE: server-side descriptor materialization. Shader-visible descriptor
+ * heap payload writes are lowered to vkWriteDescriptorsJUICE ops instead of
+ * relying on dirty-page sync of opaque descriptor bytes. */
+#define VKD3D_CONFIG_FLAG_DESCRIPTOR_MATERIALIZATION (1ull << 63)
 
 struct vkd3d_instance;
 
