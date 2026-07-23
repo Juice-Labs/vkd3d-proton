@@ -15310,6 +15310,57 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPredication(d3d12_command_li
 
 /* *PIXEvent* enum values and consts are from PIXEventsCommon.h of winpixeventruntime package  */
 
+/* Best-effort recovery of the single string argument for the dominant PIX vararg
+ * pattern, PIXBeginEvent/PIXSetMarker(color, "%s"/"%ls", str). PIX packs the format
+ * string first, then the argument(s); this only reconstructs one trailing string.
+ * It probes the two plausible layouts (argument copied directly, or preceded by a
+ * PIXEncodeStringInfo qword) and both ANSI/UTF-16 encodings, requiring a printable,
+ * NUL-terminated result within 'size'. Every access is bounded, so a wrong guess
+ * yields NULL (caller keeps the format string) and never a crash. */
+static char *pix_decode_trailing_string(const void *data, size_t size, size_t byte_offset)
+{
+    const unsigned char *base = (const unsigned char *)data;
+    const unsigned char *p;
+    size_t avail;
+
+    if (byte_offset >= size)
+        return NULL;
+
+    p = base + byte_offset;
+    avail = size - byte_offset;
+
+    /* First byte must be printable ASCII for us to trust the guess. */
+    if (p[0] < 0x20 || p[0] >= 0x7f)
+        return NULL;
+
+    if (avail >= 2 && p[1] == 0)
+    {
+        /* Looks like UTF-16. */
+        const WCHAR *w = (const WCHAR *)p;
+        size_t max_w = avail / 2;
+        size_t n = 0;
+
+        while (n < max_w && w[n] != 0)
+            ++n;
+
+        if (n > 0 && n < max_w)
+            return vkd3d_strdup_w_utf8(w, n);
+    }
+    else
+    {
+        /* Looks like ANSI. */
+        size_t n = 0;
+
+        while (n < avail && p[n] != 0)
+            ++n;
+
+        if (n > 0 && n < avail)
+            return vkd3d_strdup_n((const char *)p, n);
+    }
+
+    return NULL;
+}
+
 static char *decode_pix_blob(const void *data, size_t size)
 {
     static const UINT64 PIXEventsStringIsANSIReadMask = 0x0040000000000000;
@@ -15369,6 +15420,27 @@ static char *decode_pix_blob(const void *data, size_t size)
     {
         label_str_length = (size - 24) / 2;
         label_str = vkd3d_strdup_w_utf8((const WCHAR*)data_uint64_aligned, label_str_length);
+    }
+
+    /* PIX varargs (e.g. PIXBeginEvent(color, "%s", str)) encode the format string
+     * followed by the packed arguments. General printf-style formatting is not
+     * implemented, but the ubiquitous single-"%s"/"%ls" case is recovered so markers
+     * show the real name instead of the literal format specifier. The format string
+     * occupies the qword after the 24-byte header (offset 24); the argument follows
+     * at the next qword (offset 32), optionally preceded by a PIXEncodeStringInfo
+     * qword (offset 40). Both probes are fully bounded and fall back to the format
+     * string on any mismatch. */
+    if (type == ePIXEvent_BeginEvent_VarArgs && label_str &&
+            (!strcmp(label_str, "%s") || !strcmp(label_str, "%ls")))
+    {
+        char *arg = pix_decode_trailing_string(data, size, 32);
+        if (!arg)
+            arg = pix_decode_trailing_string(data, size, 40);
+        if (arg)
+        {
+            vkd3d_free(label_str);
+            return arg;
+        }
     }
 
     return label_str;
