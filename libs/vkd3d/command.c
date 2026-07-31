@@ -13868,6 +13868,9 @@ struct vkd3d_clear_uav_info
 {
     DXGI_FORMAT clear_dxgi_format;
     bool has_view;
+    /* Number of u32 words per texel on the raw buffer path, i.e. the period of the repeating
+     * word pattern that the clear writes. Always 1 for images and for texel buffer views. */
+    uint32_t word_count;
     union
     {
         struct vkd3d_view *view;
@@ -13881,15 +13884,16 @@ static void d3d12_command_list_clear_uav(struct d3d12_command_list *list,
 {
     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
     VkExtent3D workgroup_size, workgroup_count, view_extent;
+    D3D12_RECT full_rect, curr_rect, word_rect;
     struct vkd3d_clear_uav_pipeline pipeline;
     struct vkd3d_clear_uav_args clear_args;
     VkDescriptorBufferInfo buffer_info;
     VkDescriptorImageInfo image_info;
-    D3D12_RECT full_rect, curr_rect;
     VkWriteDescriptorSet write_set;
     unsigned int i, j, layer_count;
     uint32_t max_workgroup_count;
     bool sampler_feedback_clear;
+    uint32_t word_count;
 
     d3d12_command_list_track_resource_usage(list, resource, true);
     d3d12_command_list_end_current_render_pass(list, false);
@@ -13902,6 +13906,10 @@ static void d3d12_command_list_clear_uav(struct d3d12_command_list *list,
     sampler_feedback_clear = d3d12_resource_desc_is_sampler_feedback(&resource->desc);
 
     max_workgroup_count = list->device->vk_info.device_limits.maxComputeWorkGroupCount[0];
+
+    /* Number of shader invocations per texel along x. Only the raw buffer path can exceed 1,
+     * where a texel spans several u32 words. */
+    word_count = 1;
 
     if (sampler_feedback_clear)
     {
@@ -13976,7 +13984,16 @@ static void d3d12_command_list_clear_uav(struct d3d12_command_list *list,
         }
         else
         {
-            full_rect.right = args->u.buffer.range / sizeof(uint32_t);
+            word_count = args->word_count;
+            full_rect.right = args->u.buffer.range / (sizeof(uint32_t) * word_count);
+
+            /* Duplicate clear color elements across the array so that 8- and
+             * 16-byte formats clear from the correct elements without fixing
+             * up the indices into the clear color in the shader.
+             */
+            assert(word_count && !(ARRAY_SIZE(clear_args.clear_color.uint32) % word_count));
+            for (i = word_count; i < ARRAY_SIZE(clear_args.clear_color.uint32); i++)
+                clear_args.clear_color.uint32[i] = clear_args.clear_color.uint32[i - word_count];
 
             write_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             write_set.pBufferInfo = &buffer_info;
@@ -14015,8 +14032,14 @@ static void d3d12_command_list_clear_uav(struct d3d12_command_list *list,
                 continue;
         }
 
-        workgroup_count.width = vkd3d_compute_workgroup_count(curr_rect.right - curr_rect.left, workgroup_size.width);
-        workgroup_count.height = vkd3d_compute_workgroup_count(curr_rect.bottom - curr_rect.top, workgroup_size.height);
+        /* Rects are in texels, but on the raw path the shader indexes u32 words. Both bounds
+         * are non-negative here, having been clamped against full_rect. */
+        word_rect = curr_rect;
+        word_rect.left *= (LONG)word_count;
+        word_rect.right *= (LONG)word_count;
+
+        workgroup_count.width = vkd3d_compute_workgroup_count(word_rect.right - word_rect.left, workgroup_size.width);
+        workgroup_count.height = vkd3d_compute_workgroup_count(word_rect.bottom - word_rect.top, workgroup_size.height);
         workgroup_count.depth = vkd3d_compute_workgroup_count(layer_count, workgroup_size.depth);
 
         /* For very large buffers, we may end up having to dispatch more workgroups
@@ -14024,10 +14047,10 @@ static void d3d12_command_list_clear_uav(struct d3d12_command_list *list,
          * ignore the y and z dimensions. */
         for (j = 0; j < workgroup_count.width; j += max_workgroup_count)
         {
-            clear_args.offset.x = curr_rect.left + j * workgroup_size.width;
-            clear_args.offset.y = curr_rect.top;
-            clear_args.extent.width = curr_rect.right - clear_args.offset.x;
-            clear_args.extent.height = curr_rect.bottom - clear_args.offset.y;
+            clear_args.offset.x = word_rect.left + j * workgroup_size.width;
+            clear_args.offset.y = word_rect.top;
+            clear_args.extent.width = word_rect.right - clear_args.offset.x;
+            clear_args.extent.height = word_rect.bottom - clear_args.offset.y;
 
             VK_CALL(vkCmdPushConstants(list->cmd.vk_command_buffer,
                     pipeline.vk_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -14320,6 +14343,8 @@ static const struct vkd3d_format *vkd3d_clear_uav_find_uint_format(struct d3d12_
 static inline bool vkd3d_clear_uav_info_from_metadata(struct vkd3d_clear_uav_info *args,
         struct d3d12_desc_split_metadata metadata)
 {
+    args->word_count = 1;
+
     if (metadata.view->info.flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW)
     {
         args->has_view = true;
@@ -14398,6 +14423,135 @@ static void vkd3d_mask_uint_clear_color(uint32_t color[4], VkFormat vk_format)
     }
 }
 
+/* A clear writes the same texel to every element, so the memory pattern it leaves behind is a
+ * repeating run of texel_bytes / 4 u32 words. Pack the already masked and swizzled clear color
+ * into that run so the clear can take the raw SSBO path, which binds the buffer by
+ * {buffer, offset, range} and so needs no VkBufferView created and destroyed per clear.
+ *
+ * Only 4, 8 and 16 byte texels are handled, so the run length is always a power of two and the
+ * shader can take the pattern phase with a mask. Everything else keeps the VkBufferView path:
+ *
+ *   - Sub-4-byte formats (R8_UINT, R8G8_UINT, R16_UINT) pack several texels into one word, so a
+ *     partial word at either end of the view or of a rect would clobber texels outside it.
+ *   - R32G32B32_UINT is 3 words, which is not a power of two. D3D12 should not permit 12 byte
+ *     formats for typed UAV access, but do not rely on that.
+ *   - vkd3d_clear_uav_find_uint_format returns UNORM formats for A8 and BGRA8 since no UINT
+ *     equivalent exists; those drive the float pipeline with a color that
+ *     vkd3d_fixup_clear_uav_uint_color has already converted to floats, so they are not ours to
+ *     pack. Refusing every format not named here handles that without a special case. */
+/* The raw path binds the view's range as a storage buffer, so the descriptor offset has to
+ * satisfy minStorageBufferOffsetAlignment. vkd3d_get_metadata_buffer_view_for_resource makes
+ * the same check for unformatted UAVs and rewrites the descriptor's format to R32_UINT when it
+ * fails, precisely so that a misaligned range takes a typed view instead. Repeat the check
+ * rather than assume a formatted view is aligned; note that this is also what stops us from
+ * undoing that fallback, since it leaves clear_dxgi_format set. The resource's own memory
+ * offset does not need folding in, being aligned far more coarsely than any SSBO limit. */
+static bool vkd3d_clear_uav_buffer_is_ssbo_aligned(struct d3d12_device *device,
+        const struct vkd3d_clear_uav_info *args)
+{
+    return !(args->u.buffer.va & (d3d12_device_get_ssbo_alignment(device) - 1));
+}
+
+static bool vkd3d_clear_uav_pack_words(const struct vkd3d_format *uint_format,
+        const uint32_t color[4], uint32_t words[4], uint32_t *word_count)
+{
+    words[0] = words[1] = words[2] = words[3] = 0;
+
+    switch (uint_format->vk_format)
+    {
+        case VK_FORMAT_R32_UINT:
+            words[0] = color[0];
+            *word_count = 1;
+            return true;
+
+        case VK_FORMAT_R16G16_UINT:
+            words[0] = color[0] | (color[1] << 16);
+            *word_count = 1;
+            return true;
+
+        case VK_FORMAT_R8G8B8A8_UINT:
+            words[0] = color[0] | (color[1] << 8) | (color[2] << 16) | (color[3] << 24);
+            *word_count = 1;
+            return true;
+
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+            words[0] = color[0] | (color[1] << 10) | (color[2] << 20) | (color[3] << 30);
+            *word_count = 1;
+            return true;
+
+        case VK_FORMAT_R32G32_UINT:
+            words[0] = color[0];
+            words[1] = color[1];
+            *word_count = 2;
+            return true;
+
+        case VK_FORMAT_R16G16B16A16_UINT:
+            words[0] = color[0] | (color[1] << 16);
+            words[1] = color[2] | (color[3] << 16);
+            *word_count = 2;
+            return true;
+
+        case VK_FORMAT_R32G32B32A32_UINT:
+            words[0] = color[0];
+            words[1] = color[1];
+            words[2] = color[2];
+            words[3] = color[3];
+            *word_count = 4;
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+/* The float entry point cannot reuse vkd3d_clear_uav_pack_words, since turning a float clear
+ * color into an arbitrary target format needs unorm, snorm and half packers that do not exist
+ * in the tree. Two cases are worth taking anyway, and between them they cover the great
+ * majority of buffer clears:
+ *
+ *   - An all-zero clear color is an all-zero word run in every format that gets this far. 0.0
+ *     encodes as zero bits in UNORM, SNORM, FLOAT, R11G11B10_FLOAT and R9G9B9E5_SHAREDEXP
+ *     alike.
+ *   - 32 bit float formats need no conversion at all, only a bit copy.
+ *
+ * The clear color is tested bit-exact rather than against 0.0f, so that -0.0 falls back rather
+ * than silently becoming +0.0, which asuint() in a shader would observe. */
+static bool vkd3d_clear_uav_pack_words_float(const struct vkd3d_format *format,
+        const VkClearColorValue *color, uint32_t words[4], uint32_t *word_count)
+{
+    unsigned int i;
+
+    words[0] = words[1] = words[2] = words[3] = 0;
+
+    /* Sub-4-byte texels share a word between elements and 12 byte texels are not a power of
+     * two run, so both keep the VkBufferView path, as do block compressed formats, which have
+     * no meaningful buffer representation at all. Rejecting these before looking at the color
+     * is also what keeps us from reading the components that vkd3d_fixup_clear_uav_swizzle
+     * leaves undefined for A8_UNORM, a 1 byte format. */
+    if (vkd3d_format_is_compressed(format))
+        return false;
+    if (format->byte_count != 4 && format->byte_count != 8 && format->byte_count != 16)
+        return false;
+
+    *word_count = format->byte_count / sizeof(uint32_t);
+
+    if (!color->uint32[0] && !color->uint32[1] && !color->uint32[2] && !color->uint32[3])
+        return true;
+
+    switch (format->vk_format)
+    {
+        case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_R32G32_SFLOAT:
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+            for (i = 0; i < *word_count; i++)
+                words[i] = color->uint32[i];
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 static bool vkd3d_clear_uav_synthesize_buffer_view(struct d3d12_command_list *list,
         struct d3d12_resource *resource, const struct vkd3d_clear_uav_info *args,
         const struct vkd3d_format *override_format,
@@ -14467,9 +14621,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewUint(d3
         clear_format = NULL;
 
     /* Handle formatted buffer clears.
-     * Always defer creating the VkBufferView until this time. */
+     * Prefer packing the clear value into a repeating word pattern and taking the raw SSBO
+     * path, and only fall back to synthesizing a VkBufferView for formats that cannot be
+     * expressed that way. */
     if (!args.has_view && args.clear_dxgi_format)
     {
+        uint32_t words[4];
+
         uint_format = vkd3d_clear_uav_find_uint_format(list->device, args.clear_dxgi_format);
         if (!uint_format)
         {
@@ -14481,11 +14639,19 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewUint(d3
         color = vkd3d_fixup_clear_uav_swizzle(list->device, clear_format, color);
         vkd3d_mask_uint_clear_color(color.uint32, uint_format->vk_format);
 
-        if (!vkd3d_clear_uav_synthesize_buffer_view(list, resource_impl, &args, uint_format, &inline_view))
-            return;
+        if (vkd3d_clear_uav_buffer_is_ssbo_aligned(list->device, &args)
+                && vkd3d_clear_uav_pack_words(uint_format, color.uint32, words, &args.word_count))
+        {
+            memcpy(color.uint32, words, sizeof(words));
+        }
+        else
+        {
+            if (!vkd3d_clear_uav_synthesize_buffer_view(list, resource_impl, &args, uint_format, &inline_view))
+                return;
 
-        args.u.view = inline_view;
-        args.has_view = true;
+            args.u.view = inline_view;
+            args.has_view = true;
+        }
     }
     else if (d3d12_resource_is_texture(resource_impl) && clear_format->type != VKD3D_FORMAT_TYPE_UINT)
     {
@@ -14598,13 +14764,25 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewFloat(d
         color = vkd3d_fixup_clear_uav_swizzle(list->device, clear_format, color);
     }
 
+    /* As in ClearUnorderedAccessViewUint, prefer packing the clear value into a repeating word
+     * pattern and taking the raw SSBO path, so that no VkBufferView is created. */
     if (!args.has_view && args.clear_dxgi_format)
     {
-        if (!vkd3d_clear_uav_synthesize_buffer_view(list, resource_impl, &args, NULL, &inline_view))
-            return;
+        uint32_t words[4];
 
-        args.u.view = inline_view;
-        args.has_view = true;
+        if (clear_format && vkd3d_clear_uav_buffer_is_ssbo_aligned(list->device, &args)
+                && vkd3d_clear_uav_pack_words_float(clear_format, &color, words, &args.word_count))
+        {
+            memcpy(color.uint32, words, sizeof(words));
+        }
+        else
+        {
+            if (!vkd3d_clear_uav_synthesize_buffer_view(list, resource_impl, &args, NULL, &inline_view))
+                return;
+
+            args.u.view = inline_view;
+            args.has_view = true;
+        }
     }
 
     d3d12_command_list_clear_uav(list, resource_impl, &args, &color, rect_count, rects);

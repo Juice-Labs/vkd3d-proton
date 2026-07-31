@@ -17,6 +17,13 @@ uniform u_info_t {
 void main() {
   int thread_id = int(gl_GlobalInvocationID.x);
 
+  /* A clear writes the same texel to every element, so the memory pattern is a repeating run
+   * of one, two or four words. The caller replicates that run across the whole of clear_value,
+   * so the phase is just the low two bits and the run length need not be passed in. Take the
+   * phase from the word this invocation actually writes rather than from thread_id, so that
+   * the pattern does not depend on the dispatch starting on a run boundary. */
+  int word = u_info.dst_offset.x + thread_id;
+
   if (thread_id < u_info.dst_extent.x)
-    dst.data[u_info.dst_offset.x + thread_id] = u_info.clear_value.x;
+    dst.data[word] = u_info.clear_value[word & 3];
 }
