@@ -616,6 +616,221 @@ void test_clear_unordered_access_view_buffer(void)
 #undef BUFFER_SIZE
 }
 
+/* test_clear_unordered_access_view_buffer only covers formats whose texel is exactly one u32,
+ * so its verification compares a single word across the whole cleared range. Once a texel spans
+ * several words the clear has to write a repeating pattern, take its phase from the view rather
+ * than from the buffer, and scale rects from texels to words, none of which that test can see.
+ * Cover the wider formats here, along with the paths that cannot write a word pattern at all
+ * and still have to go through a texel buffer view. */
+void test_clear_unordered_access_view_buffer_wide_formats(void)
+{
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc;
+    ID3D12DescriptorHeap *cpu_heap, *gpu_heap;
+    unsigned int i, j, x, first_word, end_word;
+    ID3D12GraphicsCommandList *command_list;
+    unsigned int got_word, want_word, bad;
+    struct test_context_desc desc;
+    struct test_context context;
+    struct resource_readback rb;
+    ID3D12CommandQueue *queue;
+    UINT fill_value[4], word;
+    D3D12_HEAP_DESC heap_desc;
+    ID3D12Resource *buffer;
+    ID3D12Device *device;
+    ID3D12Heap *heap;
+    D3D12_RECT rect;
+    HRESULT hr;
+
+#define BUFFER_SIZE (64 * 1024)
+#define FILL_WORD 0xdeadbeefu
+    static const struct
+    {
+        DXGI_FORMAT format;
+        unsigned int first_element;
+        unsigned int element_count;
+        unsigned int values[4];
+        /* The word pattern the clear is expected to leave behind, repeated word_count words at
+         * a time starting at the first element of the view. */
+        unsigned int expected[4];
+        unsigned int word_count;
+        bool is_float;
+        /* Cleared texel range within the view. Both zero clears the whole view. */
+        unsigned int rect_left;
+        unsigned int rect_right;
+    }
+    tests[] =
+    {
+        /* Two words per texel. */
+        {DXGI_FORMAT_R32G32_UINT, 0, BUFFER_SIZE / 8,
+                {0x11111111, 0x22222222}, {0x11111111, 0x22222222}, 2},
+        /* An odd first element and a short count, so that the descriptor offset is not a
+         * round number and both untouched ends of the buffer are checked. Depending on the
+         * device's minStorageBufferOffsetAlignment this either stays on the word pattern path
+         * or falls back to a texel buffer view; both have to give the same answer. */
+        {DXGI_FORMAT_R32G32_UINT, 7, BUFFER_SIZE / 8 - 9,
+                {0x33333333, 0x44444444}, {0x33333333, 0x44444444}, 2},
+        {DXGI_FORMAT_R16G16B16A16_UINT, 3, BUFFER_SIZE / 8 - 5,
+                {0x1234, 0x5678, 0x9abc, 0xdef0}, {0x56781234, 0xdef09abc}, 2},
+        /* Components beyond the format are masked away, here to two words of zero. */
+        {DXGI_FORMAT_R16G16_UINT, 0, BUFFER_SIZE / 4,
+                {0x1234, 0x5678, 0xdead, 0xbeef}, {0x56781234}, 1},
+
+        /* Four words per texel. */
+        {DXGI_FORMAT_R32G32B32A32_UINT, 0, BUFFER_SIZE / 16,
+                {1, 2, 3, 4}, {1, 2, 3, 4}, 4},
+        {DXGI_FORMAT_R32G32B32A32_UINT, 5, BUFFER_SIZE / 16 - 6,
+                {5, 6, 7, 8}, {5, 6, 7, 8}, 4},
+
+        /* Rects are in texels and have to be scaled to words. */
+        {DXGI_FORMAT_R32G32_UINT, 0, BUFFER_SIZE / 8,
+                {0xaaaaaaaa, 0xbbbbbbbb}, {0xaaaaaaaa, 0xbbbbbbbb}, 2, false, 2, 10},
+        {DXGI_FORMAT_R32G32B32A32_UINT, 4, BUFFER_SIZE / 16 - 8,
+                {9, 10, 11, 12}, {9, 10, 11, 12}, 4, false, 3, 17},
+
+        /* Float entry point: 32 bit float formats are a bit copy. */
+        {DXGI_FORMAT_R32G32_FLOAT, 0, BUFFER_SIZE / 8,
+                {0x3f800000 /* 1.0f */, 0x40000000 /* 2.0f */},
+                {0x3f800000, 0x40000000}, 2, true},
+        {DXGI_FORMAT_R32G32B32A32_FLOAT, 2, BUFFER_SIZE / 16 - 3,
+                {0x3f800000, 0x40000000, 0x40400000 /* 3.0f */, 0x40800000 /* 4.0f */},
+                {0x3f800000, 0x40000000, 0x40400000, 0x40800000}, 4, true},
+        /* Float entry point: a zero clear is a zero word run whatever the format is. */
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, 1, BUFFER_SIZE / 8 - 2,
+                {0, 0, 0, 0}, {0, 0}, 2, true},
+        /* Float entry point: a non-zero half clear cannot be packed, so this still goes
+         * through a texel buffer view. 1.0f is 0x3c00 as a half. */
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, 1, BUFFER_SIZE / 8 - 2,
+                {0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000},
+                {0x3c003c00, 0x3c003c00}, 2, true},
+    };
+
+    memset(&desc, 0, sizeof(desc));
+    desc.no_render_target = true;
+    if (!init_test_context(&context, &desc))
+        return;
+    device = context.device;
+    command_list = context.list;
+    queue = context.queue;
+
+    cpu_heap = create_cpu_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2);
+    gpu_heap = create_gpu_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2);
+
+    /* Place the buffer at a non-zero heap offset, so that the resource's own memory offset is
+     * folded into the descriptor as well as the view's first element. */
+    heap_desc.SizeInBytes = 2 * BUFFER_SIZE;
+    memset(&heap_desc.Properties, 0, sizeof(heap_desc.Properties));
+    heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    hr = ID3D12Device_CreateHeap(device, &heap_desc, &IID_ID3D12Heap, (void **)&heap);
+    ok(hr == S_OK, "Failed to create heap, hr %#x.\n", hr);
+
+    for (j = 0; j < ARRAY_SIZE(fill_value); ++j)
+        fill_value[j] = FILL_WORD;
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        vkd3d_test_set_context("Test %u", i);
+
+        buffer = create_placed_buffer(device, heap, BUFFER_SIZE, BUFFER_SIZE,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        /* Descriptor 1 fills the whole buffer with a sentinel so that anything the clear
+         * touches outside its range is visible. */
+        memset(&uav_desc, 0, sizeof(uav_desc));
+        uav_desc.Format = DXGI_FORMAT_R32_UINT;
+        uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav_desc.Buffer.NumElements = BUFFER_SIZE / sizeof(uint32_t);
+        ID3D12Device_CreateUnorderedAccessView(device, buffer, NULL, &uav_desc,
+                get_cpu_descriptor_handle(&context, cpu_heap, 1));
+        ID3D12Device_CreateUnorderedAccessView(device, buffer, NULL, &uav_desc,
+                get_cpu_descriptor_handle(&context, gpu_heap, 1));
+
+        uav_desc.Format = tests[i].format;
+        uav_desc.Buffer.FirstElement = tests[i].first_element;
+        uav_desc.Buffer.NumElements = tests[i].element_count;
+        ID3D12Device_CreateUnorderedAccessView(device, buffer, NULL, &uav_desc,
+                get_cpu_descriptor_handle(&context, cpu_heap, 0));
+        ID3D12Device_CreateUnorderedAccessView(device, buffer, NULL, &uav_desc,
+                get_cpu_descriptor_handle(&context, gpu_heap, 0));
+
+        ID3D12GraphicsCommandList_ClearUnorderedAccessViewUint(command_list,
+                get_gpu_descriptor_handle(&context, gpu_heap, 1),
+                get_cpu_descriptor_handle(&context, cpu_heap, 1),
+                buffer, fill_value, 0, NULL);
+
+        uav_barrier(command_list, buffer);
+
+        rect.left = tests[i].rect_left;
+        rect.top = 0;
+        rect.right = tests[i].rect_right;
+        rect.bottom = 1;
+
+        if (tests[i].is_float)
+            ID3D12GraphicsCommandList_ClearUnorderedAccessViewFloat(command_list,
+                    get_gpu_descriptor_handle(&context, gpu_heap, 0),
+                    get_cpu_descriptor_handle(&context, cpu_heap, 0),
+                    buffer, (const float *)tests[i].values,
+                    tests[i].rect_right ? 1 : 0, tests[i].rect_right ? &rect : NULL);
+        else
+            ID3D12GraphicsCommandList_ClearUnorderedAccessViewUint(command_list,
+                    get_gpu_descriptor_handle(&context, gpu_heap, 0),
+                    get_cpu_descriptor_handle(&context, cpu_heap, 0),
+                    buffer, tests[i].values,
+                    tests[i].rect_right ? 1 : 0, tests[i].rect_right ? &rect : NULL);
+
+        transition_resource_state(command_list, buffer,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        get_buffer_readback_with_command_list(buffer, DXGI_FORMAT_R32_TYPELESS, &rb, queue, command_list);
+
+        /* Word indices, all relative to the start of the buffer. */
+        first_word = (tests[i].first_element + tests[i].rect_left) * tests[i].word_count;
+        end_word = tests[i].rect_right
+                ? (tests[i].first_element + tests[i].rect_right) * tests[i].word_count
+                : (tests[i].first_element + tests[i].element_count) * tests[i].word_count;
+
+        bad = ~0u;
+        got_word = want_word = 0;
+
+        for (x = 0; x < BUFFER_SIZE / sizeof(uint32_t); ++x)
+        {
+            if (x >= first_word && x < end_word)
+            {
+                /* The view always starts on a texel, so the pattern phase is the same whether
+                 * it is measured from the view or from the start of the buffer. */
+                word = tests[i].expected[x % tests[i].word_count];
+            }
+            else
+            {
+                word = FILL_WORD;
+            }
+
+            if (get_readback_uint(&rb, x, 0, 0) != word)
+            {
+                bad = x;
+                got_word = get_readback_uint(&rb, x, 0, 0);
+                want_word = word;
+                break;
+            }
+        }
+
+        ok(bad == ~0u, "Got 0x%08x at word %u, expected 0x%08x.\n", got_word, bad, want_word);
+
+        release_resource_readback(&rb);
+
+        reset_command_list(command_list, context.allocator);
+        ID3D12Resource_Release(buffer);
+    }
+    vkd3d_test_set_context(NULL);
+
+    ID3D12DescriptorHeap_Release(cpu_heap);
+    ID3D12DescriptorHeap_Release(gpu_heap);
+    ID3D12Heap_Release(heap);
+    destroy_test_context(&context);
+#undef FILL_WORD
+#undef BUFFER_SIZE
+}
+
 void test_clear_unordered_access_view_image(void)
 {
     D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support;
