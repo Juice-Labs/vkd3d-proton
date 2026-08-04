@@ -352,6 +352,8 @@ static void dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
     VkSemaphoreWaitInfo wait_info;
     VkResult vr;
 
+    VKD3D_REGION_DECL(SwapchainSemaphoreWait);
+
     if (!value)
         return;
 
@@ -360,7 +362,9 @@ static void dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
     wait_info.pSemaphores = &vk_timeline;
     wait_info.pValues = &value;
     wait_info.semaphoreCount = 1;
+    VKD3D_REGION_BEGIN(SwapchainSemaphoreWait);
     vr = VK_CALL(vkWaitSemaphores(chain->queue->device->vk_device, &wait_info, UINT64_MAX));
+    VKD3D_REGION_END(SwapchainSemaphoreWait);
     if (vr)
         ERR("Failed to wait for present semaphore, vr %d.\n", vr);
 }
@@ -1454,6 +1458,29 @@ static HRESULT dxgi_vk_swap_chain_init_sync_objects(struct dxgi_vk_swap_chain *c
     {
         ERR("Failed to create timeline semaphore, vr %d.\n", vr);
         return hresult_from_vkd3d_result(vr);
+    }
+
+    /* One-time identity report so profiling captures / logs can map VkSemaphore
+     * handles seen in vkWaitSemaphores back to their swapchain role, and prove
+     * whether VKD3D_SWAPCHAIN_LATENCY_FRAMES propagated into this process. */
+    {
+        char latency_env[8];
+        char msg[256];
+        int len;
+
+        if (!vkd3d_get_env_var("VKD3D_SWAPCHAIN_LATENCY_FRAMES", latency_env, sizeof(latency_env)))
+            snprintf(latency_env, sizeof(latency_env), "unset");
+
+        len = snprintf(msg, sizeof(msg),
+                "vkd3d swapchain %p: vk_complete_semaphore=%p vk_internal_blit_semaphore=%p "
+                "frame_latency=%u frame_latency_internal=%u VKD3D_SWAPCHAIN_LATENCY_FRAMES=%s",
+                (void *)chain,
+                (void *)chain->present.vk_complete_semaphore,
+                (void *)chain->present.vk_internal_blit_semaphore,
+                chain->frame_latency, chain->frame_latency_internal, latency_env);
+        INFO("%s\n", msg);
+        if (len > 0)
+            VKD3D_PROFILE_MESSAGE(msg, (size_t)len);
     }
 
     return S_OK;

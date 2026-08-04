@@ -141,6 +141,7 @@ static void (*pfn_tracy_set_thread_name)( const char* name );
 static void (*pfn_tracy_emit_frame_mark)( const char* name );
 static TracyCZoneCtx (*pfn_tracy_emit_zone_begin)( const struct ___tracy_source_location_data* srcloc, int active );
 static void (*pfn_tracy_emit_zone_end)( TracyCZoneCtx ctx );
+static void (*pfn_tracy_emit_message)( const char* txt, size_t size, int callstack );
 
 static void vkd3d_init_profiling_once(void)
 {
@@ -157,6 +158,7 @@ static void vkd3d_init_profiling_once(void)
         pfn_tracy_emit_frame_mark = vkd3d_dlsym(tracy, "___tracy_emit_frame_mark");
         pfn_tracy_emit_zone_begin = vkd3d_dlsym(tracy, "___tracy_emit_zone_begin");
         pfn_tracy_emit_zone_end = vkd3d_dlsym(tracy, "___tracy_emit_zone_end");
+        pfn_tracy_emit_message = vkd3d_dlsym(tracy, "___tracy_emit_message");
     }
 }
 #else
@@ -267,6 +269,12 @@ void tracy_emit_zone_end(TracyCZoneCtx ctx)
         pfn_tracy_emit_zone_end(ctx);
 }
 
+void tracy_emit_message(const char *txt, size_t size)
+{
+    if(pfn_tracy_emit_message)
+        pfn_tracy_emit_message(txt, size, 0);
+}
+
 #else
 
 void tracy_set_thread_name(const char *name)
@@ -287,6 +295,11 @@ TracyCZoneCtx tracy_emit_zone_begin(const struct ___tracy_source_location_data *
 void tracy_emit_zone_end(TracyCZoneCtx ctx)
 {
     ___tracy_emit_zone_end(ctx);
+}
+
+void tracy_emit_message(const char *txt, size_t size)
+{
+    ___tracy_emit_message(txt, size, 0);
 }
 
 #endif /* DYNAMIC_TRACY */

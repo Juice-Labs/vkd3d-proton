@@ -33,9 +33,11 @@ void tracy_set_thread_name( const char* name );
 void tracy_emit_frame_mark();
 TracyCZoneCtx tracy_emit_zone_begin( const struct ___tracy_source_location_data* srcloc, int active );
 void tracy_emit_zone_end( TracyCZoneCtx ctx );
+void tracy_emit_message( const char* txt, size_t size );
 
 #define VKD3D_PROFILE_THREAD_NAME(name) tracy_set_thread_name((name))
 #define VKD3D_PROFILE_FRAME() tracy_emit_frame_mark()
+#define VKD3D_PROFILE_MESSAGE(txt, size) tracy_emit_message((txt), (size))
 
 void vkd3d_init_profiling(void);
 bool vkd3d_uses_profiling(void);
@@ -86,6 +88,7 @@ void vkd3d_profiling_notify_work(unsigned int index, uint64_t start_ticks, uint6
 
 #define VKD3D_PROFILE_THREAD_NAME(name) ((void)0)
 #define VKD3D_PROFILE_FRAME() ((void)0)
+#define VKD3D_PROFILE_MESSAGE(txt, size) ((void)0)
 
 #endif /* TRACY_ENABLE */
 
@@ -98,6 +101,7 @@ static inline void vkd3d_init_profiling(void)
 #define VKD3D_REGION_END_ITERATIONS(name, iter) ((void)0)
 #define VKD3D_PROFILE_THREAD_NAME(name) ((void)0)
 #define VKD3D_PROFILE_FRAME() ((void)0)
+#define VKD3D_PROFILE_MESSAGE(txt, size) ((void)0)
 #endif /* VKD3D_ENABLE_PROFILING */
 
 #define VKD3D_REGION_END(name) VKD3D_REGION_END_ITERATIONS(name, 1)

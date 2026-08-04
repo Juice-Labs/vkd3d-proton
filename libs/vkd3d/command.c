@@ -211,6 +211,20 @@ HRESULT vkd3d_queue_create(struct d3d12_device *device, uint32_t family_index, u
     if (FAILED(hr = vkd3d_create_timeline_semaphore(device, 0, false, &object->submission_timeline)))
         goto fail_free_command_pool;
 
+    /* One-time identity report so profiling captures / logs can map the VkSemaphore
+     * handle seen in vkWaitSemaphores (e.g. fence worker servicing app fence waits)
+     * back to this queue's submission timeline. */
+    {
+        char msg[128];
+        int len;
+
+        len = snprintf(msg, sizeof(msg), "vkd3d queue %p: submission_timeline=%p family=%u",
+                (void *)object, (void *)object->submission_timeline, object->vk_family_index);
+        INFO("%s\n", msg);
+        if (len > 0)
+            VKD3D_PROFILE_MESSAGE(msg, (size_t)len);
+    }
+
     *queue = object;
     return hr;
 
@@ -598,6 +612,8 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
     uint64_t timeout = UINT64_MAX;
     VkResult vr;
 
+    VKD3D_REGION_DECL(AppFenceWait);
+
     if (fence->fence_info.vk_semaphore)
     {
         TRACE("worker %p, vk_semaphore %p, vk_semaphore_value %#"PRIx64".\n", worker,
@@ -618,7 +634,10 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
         if (vkd3d_config_flags & (VKD3D_CONFIG_FLAG_BREADCRUMBS | VKD3D_CONFIG_FLAG_FAULT))
             timeout = 5000000000ull;
 
-        if ((vr = VK_CALL(vkWaitSemaphores(device->vk_device, &wait_info, timeout))))
+        VKD3D_REGION_BEGIN(AppFenceWait);
+        vr = VK_CALL(vkWaitSemaphores(device->vk_device, &wait_info, timeout));
+        VKD3D_REGION_END(AppFenceWait);
+        if (vr)
         {
             ERR("Failed to wait for Vulkan timeline semaphore, vr %d.\n", vr);
             VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(device, vr == VK_ERROR_DEVICE_LOST || vr == VK_TIMEOUT);
@@ -1754,6 +1773,8 @@ static void *vkd3d_shared_fence_worker_main(void *userdata)
     uint64_t completed_value;
     VkResult vr;
 
+    VKD3D_REGION_DECL(SharedFenceWorkerWait);
+
     fence = userdata;
     vk_procs = &fence->device->vk_procs;
 
@@ -1805,7 +1826,9 @@ static void *vkd3d_shared_fence_worker_main(void *userdata)
         pthread_mutex_unlock(&fence->mutex);
 
         completed_value++;
+        VKD3D_REGION_BEGIN(SharedFenceWorkerWait);
         vr = VK_CALL(vkWaitSemaphores(fence->device->vk_device, &wait_info, 10000000ull));
+        VKD3D_REGION_END(SharedFenceWorkerWait);
         if (vr != VK_SUCCESS && vr != VK_TIMEOUT)
         {
             ERR("Failed to wait for semaphore, error %d.\n", vr);
@@ -1826,6 +1849,8 @@ static HRESULT d3d12_shared_fence_set_native_sync_handle_on_completion_explicit(
     VkSemaphoreWaitInfo wait_info;
     uint64_t completed_value;
     VkResult vr;
+
+    VKD3D_REGION_DECL(SharedFenceWait);
 
     TRACE("fence %p, value %#"PRIx64".\n", fence, value);
 
@@ -1889,7 +1914,10 @@ static HRESULT d3d12_shared_fence_set_native_sync_handle_on_completion_explicit(
         wait_info.pSemaphores = &fence->timeline_semaphore;
         wait_info.pValues = &value;
 
-        if ((vr = VK_CALL(vkWaitSemaphores(fence->device->vk_device, &wait_info, UINT64_MAX))))
+        VKD3D_REGION_BEGIN(SharedFenceWait);
+        vr = VK_CALL(vkWaitSemaphores(fence->device->vk_device, &wait_info, UINT64_MAX));
+        VKD3D_REGION_END(SharedFenceWait);
+        if (vr)
         {
             ERR("Failed to wait on shared fence, vr %d.\n", vr);
             return E_FAIL;
