@@ -6109,6 +6109,8 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
     {
+        VkMappedMemoryWriteRegionJUICE regions[3];
+        const struct vkd3d_vk_device_procs *vk_procs;
         const uint8_t *src_set0, *src_set1;
         const VkDeviceAddress *src_va;
         uint8_t *dst_set0, *dst_set1;
@@ -6150,9 +6152,22 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 dst.types[i] = src.types[i];
             }
         }
+
+        /* Bank pointers are Juice client/shadow views; publish dirty ranges after stores. */
+        vkd3d_memcpy_non_temporal_barrier();
+        vk_procs = &dst.heap->device->vk_procs;
+        regions[0].pHostPointer = dst_set0;
+        regions[0].size = 16u * descriptor_count;
+        regions[1].pHostPointer = dst_set1;
+        regions[1].size = 16u * descriptor_count;
+        regions[2].pHostPointer = descriptor_count == 1 ? &dst_va[dst.offset] : dst_va;
+        regions[2].size = 8u * descriptor_count;
+        VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 3, regions));
     }
     else if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
     {
+        VkMappedMemoryWriteRegionJUICE region;
+        const struct vkd3d_vk_device_procs *vk_procs;
         const uint32_t *src_sampler = src.heap->fast_pointer_bank[0];
         uint32_t *dst_sampler = dst.heap->fast_pointer_bank[0];
 
@@ -6176,6 +6191,12 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 dst.types[i] = src.types[i];
             }
         }
+
+        vkd3d_memcpy_non_temporal_barrier();
+        vk_procs = &dst.heap->device->vk_procs;
+        region.pHostPointer = dst_sampler;
+        region.size = 4u * descriptor_count;
+        VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 1, &region));
     }
     else
     {
@@ -6213,6 +6234,7 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
 
     if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
     {
+        VkMappedMemoryWriteRegionJUICE regions[3];
         const uint8_t *src_set0, *src_set1;
         const VkDeviceAddress *src_va;
         uint8_t *dst_set0, *dst_set1;
@@ -6254,9 +6276,23 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 dst.types[i] = src.types[i];
             }
         }
+
+        /* Bank pointers are Juice client/shadow views; publish dirty ranges after stores. */
+        {
+            const struct vkd3d_vk_device_procs *vk_procs = &dst.heap->device->vk_procs;
+            vkd3d_memcpy_non_temporal_barrier();
+            regions[0].pHostPointer = dst_set0;
+            regions[0].size = 64u * descriptor_count;
+            regions[1].pHostPointer = dst_set1;
+            regions[1].size = 64u * descriptor_count;
+            regions[2].pHostPointer = descriptor_count == 1 ? &dst_va[dst.offset] : dst_va;
+            regions[2].size = 8u * descriptor_count;
+            VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 3, regions));
+        }
     }
     else if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
     {
+        VkMappedMemoryWriteRegionJUICE region;
         const uint8_t *src_sampler = src.heap->fast_pointer_bank[0];
         uint8_t *dst_sampler = dst.heap->fast_pointer_bank[0];
 
@@ -6279,6 +6315,14 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
                 dst.view[i] = src.view[i];
                 dst.types[i] = src.types[i];
             }
+        }
+
+        {
+            const struct vkd3d_vk_device_procs *vk_procs = &dst.heap->device->vk_procs;
+            vkd3d_memcpy_non_temporal_barrier();
+            region.pHostPointer = dst_sampler;
+            region.size = 32u * descriptor_count;
+            VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 1, &region));
         }
     }
     else
