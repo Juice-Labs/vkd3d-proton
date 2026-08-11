@@ -90,19 +90,6 @@ static void d3d12_command_list_clear_rtas_batch(struct d3d12_command_list *list)
 
 static void d3d12_command_list_flush_query_resolves(struct d3d12_command_list *list);
 
-static HRESULT vkd3d_create_binary_semaphore(struct d3d12_device *device, VkSemaphore *vk_semaphore)
-{
-    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-    VkSemaphoreCreateInfo info;
-    VkResult vr;
-
-    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    info.pNext = NULL;
-    info.flags = 0;
-    vr = VK_CALL(vkCreateSemaphore(device->vk_device, &info, NULL, vk_semaphore));
-    return hresult_from_vk_result(vr);
-}
-
 static bool vkd3d_driver_implicitly_syncs_host_readback(VkDriverId driver_id)
 {
     return driver_id == VK_DRIVER_ID_MESA_RADV ||
@@ -21251,11 +21238,12 @@ static void d3d12_command_queue_gather_wait_semaphores_locked(struct d3d12_comma
         command_queue->vkd3d_queue->wait_count = 0u;
     }
 
-    if ((wait_flags & VKD3D_WAIT_SEMAPHORES_SERIALIZING) && command_queue->serializing_semaphore_signaled)
+    if ((wait_flags & VKD3D_WAIT_SEMAPHORES_SERIALIZING) && command_queue->serializing_semaphore_value)
     {
         memset(&serializing_semaphore, 0, sizeof(serializing_semaphore));
         serializing_semaphore.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
         serializing_semaphore.semaphore = command_queue->serializing_semaphore;
+        serializing_semaphore.value = command_queue->serializing_semaphore_value;
         serializing_semaphore.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
         d3d12_command_queue_add_wait_semaphores(command_queue, 1, &serializing_semaphore);
@@ -21311,8 +21299,6 @@ static void d3d12_command_queue_flush_waiters(struct d3d12_command_queue *comman
         if ((vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE))))
             ERR("Failed to submit semaphore waits, vr %d.\n", vr);
 
-        if (vr == VK_SUCCESS && (wait_flags & VKD3D_WAIT_SEMAPHORES_SERIALIZING))
-            command_queue->serializing_semaphore_signaled = false;
     }
 
     vkd3d_queue_release(command_queue->vkd3d_queue);
@@ -21955,7 +21941,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     VkLatencySubmissionPresentIdNV latency_submit_present_info;
     struct dxgi_vk_swap_chain *low_latency_swapchain;
     VkSemaphoreSubmitInfo signal_semaphore_infos[2];
-    VkSemaphoreSubmitInfo *binary_semaphore_info;
+    VkSemaphoreSubmitInfo *serializing_semaphore_info;
     bool stagger_submissions, is_first, is_last;
     uint32_t cmd_index, cmd_count, total_cost;
     struct vkd3d_fence_wait_info fence_info;
@@ -22117,15 +22103,16 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
                   VKD3D_WAIT_SEMAPHORES_EXTERNAL | VKD3D_WAIT_SEMAPHORES_SERIALIZING);
         }
 
-        /* Prefer binary semaphore since timeline signal -> wait pair can cause scheduling bubbles.
-         * Binary semaphores tend to be more well-behaved here since they can lower to kernel primitives
-         * more easily. Must happen after setting up waits to track the binary semaphore state correctly. */
+        /* Serialize consecutive ExecuteCommandLists submissions with a monotonically increasing
+         * timeline value. This avoids relying on consumable binary semaphore payloads when
+         * submissions are transported asynchronously. */
         if (command_queue->serializing_semaphore && is_last)
         {
-            binary_semaphore_info = &signal_semaphore_infos[submit->signalSemaphoreInfoCount++];
-            binary_semaphore_info->sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-            binary_semaphore_info->semaphore = command_queue->serializing_semaphore;
-            binary_semaphore_info->stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            serializing_semaphore_info = &signal_semaphore_infos[submit->signalSemaphoreInfoCount++];
+            serializing_semaphore_info->sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            serializing_semaphore_info->semaphore = command_queue->serializing_semaphore;
+            serializing_semaphore_info->value = command_queue->serializing_semaphore_value + 1;
+            serializing_semaphore_info->stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         }
 
         if (exec->split_submission)
@@ -22141,7 +22128,8 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         if (vr != VK_SUCCESS)
             break;
 
-        command_queue->serializing_semaphore_signaled = command_queue->serializing_semaphore && is_last;
+        if (command_queue->serializing_semaphore && is_last)
+            command_queue->serializing_semaphore_value++;
 
         memset(submit_desc, 0, sizeof(submit_desc));
         num_submits = 0;
@@ -22933,7 +22921,7 @@ static HRESULT d3d12_command_queue_init(struct d3d12_command_queue *queue,
 
     if (!queue->vkd3d_queue->barrier_command_buffer)
     {
-        if (FAILED(hr = vkd3d_create_binary_semaphore(device, &queue->serializing_semaphore)))
+        if (FAILED(hr = vkd3d_create_timeline_semaphore(device, 0, false, &queue->serializing_semaphore)))
             goto fail_create_semaphore;
     }
 

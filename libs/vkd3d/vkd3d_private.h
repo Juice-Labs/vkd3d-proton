@@ -3623,7 +3623,7 @@ struct d3d12_command_queue
     size_t wait_semaphore_count;
 
     VkSemaphore serializing_semaphore;
-    bool serializing_semaphore_signaled;
+    uint64_t serializing_semaphore_value;
 
     struct
     {
