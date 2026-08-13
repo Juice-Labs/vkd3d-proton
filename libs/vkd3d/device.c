@@ -6128,6 +6128,12 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
         src_set0 += src.offset * 16;
         src_set1 += src.offset * 16;
 
+        /* Shadow-view stores are invisible to Juice dirty tracking until the
+         * notify below; bracket stores + notify so a concurrent submit snapshot
+         * cannot read them half-written. */
+        vk_procs = &dst.heap->device->vk_procs;
+        VK_CALL(vkBeginMappedMemoryWriteJUICE(dst.heap->device->vk_device));
+
         if (VKD3D_EXPECT_TRUE(descriptor_count == 1))
         {
             vkd3d_memcpy_aligned_16_cached(dst_set0, src_set0);
@@ -6155,7 +6161,6 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
 
         /* Bank pointers are Juice client/shadow views; publish dirty ranges after stores. */
         vkd3d_memcpy_non_temporal_barrier();
-        vk_procs = &dst.heap->device->vk_procs;
         regions[0].pHostPointer = dst_set0;
         regions[0].size = 16u * descriptor_count;
         regions[1].pHostPointer = dst_set1;
@@ -6163,6 +6168,7 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
         regions[2].pHostPointer = descriptor_count == 1 ? &dst_va[dst.offset] : dst_va;
         regions[2].size = 8u * descriptor_count;
         VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 3, regions));
+        VK_CALL(vkEndMappedMemoryWriteJUICE(dst.heap->device->vk_device));
     }
     else if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
     {
@@ -6173,6 +6179,9 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
 
         src_sampler += src.offset;
         dst_sampler += dst.offset;
+
+        vk_procs = &dst.heap->device->vk_procs;
+        VK_CALL(vkBeginMappedMemoryWriteJUICE(dst.heap->device->vk_device));
 
         if (VKD3D_EXPECT_TRUE(descriptor_count == 1))
         {
@@ -6193,10 +6202,10 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
         }
 
         vkd3d_memcpy_non_temporal_barrier();
-        vk_procs = &dst.heap->device->vk_procs;
         region.pHostPointer = dst_sampler;
         region.size = 4u * descriptor_count;
         VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 1, &region));
+        VK_CALL(vkEndMappedMemoryWriteJUICE(dst.heap->device->vk_device));
     }
     else
     {
@@ -6252,6 +6261,13 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
         src_set0 += src.offset * 64;
         src_set1 += src.offset * 64;
 
+        /* Shadow-view stores; bracket stores + notify against the Juice
+         * submit snapshot (see 16_16_4 path). */
+        {
+            const struct vkd3d_vk_device_procs *vk_procs = &dst.heap->device->vk_procs;
+            VK_CALL(vkBeginMappedMemoryWriteJUICE(dst.heap->device->vk_device));
+        }
+
         if (VKD3D_EXPECT_TRUE(descriptor_count == 1))
         {
             vkd3d_memcpy_aligned_cached(dst_set0, src_set0, 64);
@@ -6288,6 +6304,7 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
             regions[2].pHostPointer = descriptor_count == 1 ? &dst_va[dst.offset] : dst_va;
             regions[2].size = 8u * descriptor_count;
             VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 3, regions));
+            VK_CALL(vkEndMappedMemoryWriteJUICE(dst.heap->device->vk_device));
         }
     }
     else if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
@@ -6298,6 +6315,11 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
 
         src_sampler += src.offset * 32;
         dst_sampler += dst.offset * 32;
+
+        {
+            const struct vkd3d_vk_device_procs *vk_procs = &dst.heap->device->vk_procs;
+            VK_CALL(vkBeginMappedMemoryWriteJUICE(dst.heap->device->vk_device));
+        }
 
         if (VKD3D_EXPECT_TRUE(descriptor_count == 1))
         {
@@ -6323,6 +6345,7 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_descriptor_buff
             region.pHostPointer = dst_sampler;
             region.size = 32u * descriptor_count;
             VK_CALL(vkNotifyMappedMemoryWriteJUICE(dst.heap->device->vk_device, 1, &region));
+            VK_CALL(vkEndMappedMemoryWriteJUICE(dst.heap->device->vk_device));
         }
     }
     else

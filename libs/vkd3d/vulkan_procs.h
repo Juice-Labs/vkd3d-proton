@@ -207,6 +207,8 @@ VK_DEVICE_PFN(vkBeginCommandBatchJUICE)
 VK_DEVICE_PFN(vkEndCommandBatchJUICE)
 VK_DEVICE_PFN(vkGetMappedMemoryClientPointerJUICE)
 VK_DEVICE_PFN(vkNotifyMappedMemoryWriteJUICE)
+VK_DEVICE_PFN(vkBeginMappedMemoryWriteJUICE)
+VK_DEVICE_PFN(vkEndMappedMemoryWriteJUICE)
 
 ///* VK_KHR_buffer_device_address */
 //VK_DEVICE_EXT_PFN(vkGetBufferDeviceAddressKHR)
