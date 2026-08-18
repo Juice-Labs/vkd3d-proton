@@ -10038,6 +10038,14 @@ HRESULT vkd3d_memory_info_init(struct vkd3d_memory_info *info,
 HRESULT vkd3d_global_descriptor_buffer_init(struct vkd3d_global_descriptor_buffer *global_descriptor_buffer,
         struct d3d12_device *device)
 {
+    /* Juice: never take the descriptor-buffer path. Leaving resource.va == 0
+     * makes d3d12_device_uses_descriptor_buffers() false, so bindless falls
+     * back to mutable descriptor sets and vkGetDescriptorEXT is never called. */
+    (void)global_descriptor_buffer;
+    (void)device;
+    INFO("Juice: disabling VK_EXT_descriptor_buffer, using mutable descriptor sets.\n");
+    return S_OK;
+#if 0
     VkBufferUsageFlags2KHR vk_usage_flags;
     HRESULT hr;
 
@@ -10133,6 +10141,7 @@ HRESULT vkd3d_global_descriptor_buffer_init(struct vkd3d_global_descriptor_buffe
     global_descriptor_buffer->sampler.usage = vk_usage_flags;
 
     return S_OK;
+#endif
 }
 
 void vkd3d_global_descriptor_buffer_cleanup(struct vkd3d_global_descriptor_buffer *global_descriptor_buffer,

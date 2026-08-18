@@ -110,7 +110,11 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(EXT_MUTABLE_DESCRIPTOR_TYPE, EXT_mutable_descriptor_type),
     VK_EXTENSION(EXT_HDR_METADATA, EXT_hdr_metadata),
     VK_EXTENSION(EXT_SHADER_MODULE_IDENTIFIER, EXT_shader_module_identifier),
-    VK_EXTENSION(EXT_DESCRIPTOR_BUFFER, EXT_descriptor_buffer),
+    /* Juice: do not enable VK_EXT_descriptor_buffer. That path writes host-visible
+     * opaque descriptor blobs via vkGetDescriptorEXT, which the client cannot
+     * produce. Falling back to mutable descriptor sets keeps bindless D3D12
+     * heaps on handle-based updates instead of JDRF placeholders. */
+    /* VK_EXTENSION(EXT_DESCRIPTOR_BUFFER, EXT_descriptor_buffer), */
     VK_EXTENSION_DISABLE_COND(EXT_PIPELINE_LIBRARY_GROUP_HANDLES, EXT_pipeline_library_group_handles, VKD3D_CONFIG_FLAG_NO_DXR),
     VK_EXTENSION(EXT_IMAGE_SLICED_VIEW_OF_3D, EXT_image_sliced_view_of_3d),
     VK_EXTENSION(EXT_GRAPHICS_PIPELINE_LIBRARY, EXT_graphics_pipeline_library),
