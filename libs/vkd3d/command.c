@@ -514,6 +514,13 @@ static void vkd3d_waiting_fence_signal_fence(struct vkd3d_fence_worker *worker,
         if (FAILED(hr = d3d12_fence_signal(info->fence, worker, info->update_count)))
             ERR("Failed to signal D3D12 fence, hr %#x.\n", hr);
     }
+    else
+    {
+        /* Dropping the signal leaves the pending update stranded forever, which strands every
+         * later ensure_signal_order barrier on this fence. Never silently. */
+        ERR("JUICEDIAG: dropped fence signal, fence %p, virtual value %"PRIu64", update_count %"PRIu64".\n",
+                info->fence, info->virtual_value, info->update_count);
+    }
 
     d3d12_fence_dec_ref(info->fence);
 }
@@ -621,6 +628,8 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
         if ((vr = VK_CALL(vkWaitSemaphores(device->vk_device, &wait_info, timeout))))
         {
             ERR("Failed to wait for Vulkan timeline semaphore, vr %d.\n", vr);
+            ERR("JUICEDIAG: failed wait was worker %p, vk_semaphore %p, value %"PRIu64", timeout %"PRIu64".\n",
+                    worker, fence->fence_info.vk_semaphore, fence->fence_info.vk_semaphore_value, timeout);
             VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(device, vr == VK_ERROR_DEVICE_LOST || vr == VK_TIMEOUT);
             vkd3d_waiting_fence_complete_submissions(device, worker, fence, false);
             return;
@@ -719,6 +728,25 @@ static void *vkd3d_fence_worker_main(void *arg)
     return NULL;
 }
 
+/* One-shot probe so the client log tells us which vkd3d levels are actually reaching
+ * __wine_dbg_output. Without it, a missing ERR is absence of evidence rather than evidence
+ * of absence, which is exactly the ambiguity the JUICEDIAG lines above are meant to remove. */
+static void vkd3d_juicediag_log_level_probe(void)
+{
+    static bool probed;
+
+    if (probed)
+        return;
+    probed = true;
+
+    ERR("JUICEDIAG-LEVELPROBE: configured API level %d; err reaches the log.\n",
+            vkd3d_dbg_get_level(VKD3D_DBG_CHANNEL_API));
+    INFO("JUICEDIAG-LEVELPROBE: info reaches the log.\n");
+    FIXME("JUICEDIAG-LEVELPROBE: fixme reaches the log.\n");
+    WARN("JUICEDIAG-LEVELPROBE: warn reaches the log.\n");
+    TRACE("JUICEDIAG-LEVELPROBE: trace reaches the log.\n");
+}
+
 static HRESULT vkd3d_fence_worker_start(struct vkd3d_fence_worker *worker,
         struct d3d12_command_queue *queue,
         struct d3d12_device *device)
@@ -726,6 +754,8 @@ static HRESULT vkd3d_fence_worker_start(struct vkd3d_fence_worker *worker,
     int rc;
 
     TRACE("worker %p.\n", worker);
+
+    vkd3d_juicediag_log_level_probe();
 
     worker->should_exit = false;
     worker->device = device;
@@ -1188,6 +1218,12 @@ static HRESULT d3d12_fence_signal(struct d3d12_fence *fence, struct vkd3d_fence_
         return hresult_from_errno(rc);
     }
 
+    if (fence->signal_count >= update_count)
+    {
+        ERR("JUICEDIAG: fence %p signal for update_count %"PRIu64" is a no-op, signal_count already %"PRIu64".\n",
+                fence, update_count, fence->signal_count);
+    }
+
     /* With multiple fence workers, it is possible that signal calls are
      * out of order. The physical value itself is monotonic, but we need to
      * make sure that all signals happen in correct order if there are fence rewinds.
@@ -1212,7 +1248,11 @@ static HRESULT d3d12_fence_signal(struct d3d12_fence *fence, struct vkd3d_fence_
         }
 
         if (!did_signal)
-            FIXME("Did not signal a virtual value?\n");
+        {
+            ERR("JUICEDIAG: fence %p advanced to signal_count %"PRIu64" with no matching pending update "
+                    "(target update_count %"PRIu64", %zu pending).\n",
+                    fence, fence->signal_count, update_count, fence->pending_updates_count);
+        }
     }
 
     /* In case we have a rewind signalled from GPU, we need to recompute the max pending timeline value. */
