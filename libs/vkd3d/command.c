@@ -1057,18 +1057,30 @@ static bool d3d12_fence_block_until_pending_value_reaches_locked(
         /* We have a submitted signal that will eventually satisfy this wait. Materialize the wait now. */
 
         /* If we have a satisfying signal in the same physical VkQueue, we can just rely on submission order.
-         * Avoids potential bubbles. */
+         * Avoids potential bubbles.
+         * pending_updates is unordered, since applying an update swap-removes from it, so the first
+         * array hit can be an update far later than the one that actually satisfies the wait.
+         * Ordering against that is not required, and since the barrier blocks a fence worker until
+         * another worker applies the update, a gratuitously late choice can close a cycle between
+         * two workers and deadlock both. Pick the earliest satisfying update, matching how the
+         * cross-queue loop below resolves the same ambiguity. */
         for (i = 0; i < fence->pending_updates_count; i++)
         {
             if (fence->pending_updates[i].vk_semaphore == command_queue->vkd3d_queue->submission_timeline &&
-                    fence->pending_updates[i].virtual_value >= pending_value)
+                    fence->pending_updates[i].virtual_value >= pending_value &&
+                    fence->pending_updates[i].update_count < update_count)
             {
-                /* It's possible we signalled on the same physical queue, but that doesn't mean
-                 * they belong to the same virtual queue, and therefore the fence workers that update the
-                 * values will live in different threads. */
-                d3d12_command_queue_ensure_fence_signal_order(command_queue, fence, fence->pending_updates[i].update_count);
-                return false;
+                update_count = fence->pending_updates[i].update_count;
             }
+        }
+
+        if (update_count != UINT64_MAX)
+        {
+            /* It's possible we signalled on the same physical queue, but that doesn't mean
+             * they belong to the same virtual queue, and therefore the fence workers that update the
+             * values will live in different threads. */
+            d3d12_command_queue_ensure_fence_signal_order(command_queue, fence, update_count);
+            return false;
         }
 
         /* If there are multiple submits from different queues that can satisfy the wait,
