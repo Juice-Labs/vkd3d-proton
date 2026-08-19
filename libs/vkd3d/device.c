@@ -10014,6 +10014,23 @@ static void d3d12_device_replace_vtable(struct d3d12_device *device)
             device->ID3D12Device_iface.lpVtbl = &d3d12_device_vtbl_descriptor_buffer_64_64_32;
         }
     }
+
+    /* The descriptor sizes here select which copy/write path runs, and those paths are
+     * what duplicate placeholder payloads around. Two runs are only comparable if they
+     * land on the same one, so state it outright rather than inferring it from handles. */
+    ERR("Descriptor path: embedded=%u descriptorBuffers=%u cbvSrvUavSize=%u samplerSize=%u "
+            "robustStorageBufferSize=%u mutableDescriptorType=%u packedMetadata=%u rawSSBO=%u "
+            "vendorID=%#x deviceID=%#x.\n",
+            (unsigned)d3d12_device_use_embedded_mutable_descriptors(device),
+            (unsigned)d3d12_device_uses_descriptor_buffers(device),
+            (unsigned)device->bindless_state.descriptor_buffer_cbv_srv_uav_size,
+            (unsigned)device->bindless_state.descriptor_buffer_sampler_size,
+            (unsigned)device->device_info.descriptor_buffer_properties.robustStorageBufferDescriptorSize,
+            (unsigned)device->device_info.mutable_descriptor_features.mutableDescriptorType,
+            (unsigned)!!(device->bindless_state.flags & VKD3D_BINDLESS_MUTABLE_EMBEDDED_PACKED_METADATA),
+            (unsigned)!!(device->bindless_state.flags & VKD3D_BINDLESS_MUTABLE_TYPE_RAW_SSBO),
+            device->device_info.properties2.properties.vendorID,
+            device->device_info.properties2.properties.deviceID);
 }
 
 extern CONST_VTBL struct ID3D12DeviceExt1Vtbl d3d12_device_vkd3d_ext_vtbl;

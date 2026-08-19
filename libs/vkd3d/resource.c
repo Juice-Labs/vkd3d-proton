@@ -10053,7 +10053,19 @@ HRESULT vkd3d_global_descriptor_buffer_init(struct vkd3d_global_descriptor_buffe
             !device->device_info.descriptor_buffer_features.descriptorBufferPushDescriptors ||
             !device->device_info.vulkan_1_2_features.shaderUniformBufferArrayNonUniformIndexing ||
             requires_offset_buffer)
+    {
+        /* Falling back here is silent and changes the descriptor encoding wholesale,
+         * which is indistinguishable from the extension being absent. Name the gate. */
+        ERR("Descriptor buffers disabled: descriptorBuffer=%u pushDescriptors=%u "
+                "uboNonUniformIndexing=%u requiresOffsetBuffer=%u "
+                "(minStorageBufferOffsetAlignment=%"PRIu64").\n",
+                device->device_info.descriptor_buffer_features.descriptorBuffer,
+                device->device_info.descriptor_buffer_features.descriptorBufferPushDescriptors,
+                device->device_info.vulkan_1_2_features.shaderUniformBufferArrayNonUniformIndexing,
+                (unsigned)requires_offset_buffer,
+                (uint64_t)device->device_info.properties2.properties.limits.minStorageBufferOffsetAlignment);
         return S_OK;
+    }
 
     if (device->device_info.mutable_descriptor_features.mutableDescriptorType)
     {
@@ -10078,7 +10090,11 @@ HRESULT vkd3d_global_descriptor_buffer_init(struct vkd3d_global_descriptor_buffe
         if (device->device_info.descriptor_buffer_properties.maxResourceDescriptorBufferRange <
                 required_resource_descriptors * mutable_desc_size)
         {
-            INFO("Small descriptor heap detected, falling back to MUTABLE_SINGLE_SET.\n");
+            ERR("Descriptor buffers disabled: small descriptor heap, "
+                    "maxResourceDescriptorBufferRange=%"PRIu64" < %"PRIu64" required. "
+                    "Falling back to MUTABLE_SINGLE_SET.\n",
+                    (uint64_t)device->device_info.descriptor_buffer_properties.maxResourceDescriptorBufferRange,
+                    (uint64_t)(required_resource_descriptors * mutable_desc_size));
             return S_OK;
         }
     }
