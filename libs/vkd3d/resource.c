@@ -5046,12 +5046,34 @@ void d3d12_desc_copy(vkd3d_cpu_descriptor_va_t dst_va, vkd3d_cpu_descriptor_va_t
         d3d12_desc_copy_range(dst_va, src_va, count, heap_type, device);
 }
 
+/* Counts calls to the buffer view helpers so an unexpected vkCreateBufferView volume can be
+ * attributed to a path.  Each formatted buffer view costs two slots in NVIDIA's bindless
+ * texture heap, and that heap's allocation cursor never rewinds, so a hot path here shows up
+ * as heap pressure on a Juice server.  The counters are plain statics: approximate under
+ * concurrency, which is fine for telling a live path from a dead one.
+ *
+ *   vkd3d_create_raw_r32ui_vk_buffer_view -- root SRV/UAV push descriptors, reached only when
+ *       minStorageBufferOffsetAlignment > 4 (see d3d12_device_use_ssbo_root_descriptors)
+ *   vkd3d_create_vk_buffer_view           -- every formatted view, whatever the caller
+ *   vkd3d_create_buffer_view              -- the vkd3d_view wrapper: view maps, UAV clears,
+ *       sampler feedback encode/decode
+ */
+#define VKD3D_COUNT_BUFFER_VIEW_CALL(what)                                      \
+    do {                                                                        \
+        static uint32_t vkd3d_buffer_view_calls;                                \
+        uint32_t vkd3d_buffer_view_count = ++vkd3d_buffer_view_calls;           \
+        if (vkd3d_buffer_view_count == 1 || !(vkd3d_buffer_view_count & 0xfff)) \
+            INFO(what ": %u calls.\n", vkd3d_buffer_view_count);                \
+    } while (0)
+
 bool vkd3d_create_raw_r32ui_vk_buffer_view(struct d3d12_device *device,
         VkBuffer vk_buffer, VkDeviceSize offset, VkDeviceSize range, VkBufferView *vk_view)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct VkBufferViewCreateInfo view_desc;
     VkResult vr;
+
+    VKD3D_COUNT_BUFFER_VIEW_CALL("vkd3d_create_raw_r32ui_vk_buffer_view");
 
     if (offset % 4)
         FIXME("Offset %#"PRIx64" violates the required alignment 4.\n", offset);
@@ -5076,6 +5098,8 @@ bool vkd3d_create_vk_buffer_view(struct d3d12_device *device,
     struct VkBufferViewCreateInfo view_desc;
     VkResult vr;
 
+    VKD3D_COUNT_BUFFER_VIEW_CALL("vkd3d_create_vk_buffer_view");
+
     if (vkd3d_format_is_compressed(format))
     {
         WARN("Invalid format for buffer view %#x.\n", format->dxgi_format);
@@ -5099,6 +5123,8 @@ bool vkd3d_create_buffer_view(struct d3d12_device *device, const struct vkd3d_bu
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_view *object;
     VkBufferView vk_view;
+
+    VKD3D_COUNT_BUFFER_VIEW_CALL("vkd3d_create_buffer_view");
 
     if (!vkd3d_create_vk_buffer_view(device, desc->buffer, desc->format, desc->offset, desc->size, &vk_view))
         return false;

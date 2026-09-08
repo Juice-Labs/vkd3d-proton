@@ -1697,13 +1697,38 @@ static bool d3d12_device_is_steam_deck(const struct d3d12_device *device)
 static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_info *info,
         struct d3d12_device *device)
 {
+    VkDeviceSize reported_ssbo_alignment;
+    bool nv_ssbo_workaround;
+
     /* A performance workaround for NV.
      * The 16 byte offset is a lie, as that is only actually required when we
      * use vectorized load-stores. When we emit vectorized load-store ops,
      * the storage buffer must be aligned properly, so this is fine in practice
      * and is a nice speed boost. */
-    if (info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+    reported_ssbo_alignment = info->properties2.properties.limits.minStorageBufferOffsetAlignment;
+    nv_ssbo_workaround = info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+    if (nv_ssbo_workaround)
         info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
+
+    // HACK: Force this because it doesn't seem to be getting set anymore?
+    info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
+
+    /* This limit decides whether root SRV/UAV descriptors become storage buffers or
+     * texel buffer views -- see d3d12_device_use_ssbo_root_descriptors, which requires
+     * <= 4. On NVIDIA a texel buffer view costs two bindless texture heap slots, and one
+     * is created per root descriptor binding per command list, so the difference is
+     * thousands of vkCreateBufferView calls. Log the whole decision so an unexpected
+     * call count can be attributed here or ruled out. */
+    INFO("minStorageBufferOffsetAlignment: reported %#"PRIx64", effective %#"PRIx64
+         " (driverID %u \"%s\"; NV workaround %s, unconditional override applied). "
+         "Root SRV/UAV descriptors will use %s.\n",
+         reported_ssbo_alignment,
+         info->properties2.properties.limits.minStorageBufferOffsetAlignment,
+         (unsigned int)info->vulkan_1_2_properties.driverID,
+         info->vulkan_1_2_properties.driverName,
+         nv_ssbo_workaround ? "matched" : "did not match",
+         info->properties2.properties.limits.minStorageBufferOffsetAlignment <= 4
+                 ? "storage buffers (no buffer views)" : "texel buffer views");
 
     /* UE5 is broken and assumes that if mesh shaders are supported, barycentrics are also supported.
      * This happens to be the case on RDNA2+ and Turing+ on Windows, but Mesa landed barycentrics long
@@ -6012,7 +6037,7 @@ static inline void d3d12_device_copy_descriptors(struct d3d12_device *device,
             {
                 bool has_space = d3d12_desc_copy_accumulate(dst.ptr, src.ptr, copy_count,
                         descriptor_heap_type, device, vk_copies, max_copies, &accumulated_copy_count);
-                
+
                 if (!has_space)
                 {
                     /* Buffer full, flush and continue */
@@ -8453,7 +8478,7 @@ static D3D12_RESOURCE_STATES vkd3d_barrier_layout_to_resource_state(D3D12_BARRIE
 }
 
 static HRESULT STDMETHODCALLTYPE d3d12_device_CreateCommittedResource3(d3d12_device_iface *iface,
-    const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags, 
+    const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
     const D3D12_RESOURCE_DESC1 *desc, D3D12_BARRIER_LAYOUT initial_layout,
     const D3D12_CLEAR_VALUE *optimized_clear_value, ID3D12ProtectedResourceSession *protected_session,
     UINT32 num_castable_formats, const DXGI_FORMAT *castable_formats, REFIID iid, void **resource)
@@ -8465,7 +8490,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateCommittedResource3(d3d12_dev
     TRACE("iface %p, heap_properties %p, heap_flags %u, desc %p, initial_layout %u, "
             "optimized_clear_value %p, protected_session %p, num_castable_formats %u, "
             "castable_formats %p, iid %s, resource %p stub!\n", iface,
-            heap_properties, heap_flags, desc, initial_layout, optimized_clear_value, 
+            heap_properties, heap_flags, desc, initial_layout, optimized_clear_value,
             protected_session, num_castable_formats, castable_formats, debugstr_guid(iid), resource);
 
     if (protected_session)
@@ -8494,7 +8519,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateCommittedResource3(d3d12_dev
 
 static HRESULT STDMETHODCALLTYPE d3d12_device_CreatePlacedResource2(d3d12_device_iface *iface,
     ID3D12Heap *heap, UINT64 heap_offset, const D3D12_RESOURCE_DESC1 *desc, D3D12_BARRIER_LAYOUT initial_layout,
-    const D3D12_CLEAR_VALUE *optimized_clear_value, UINT32 num_castable_formats, 
+    const D3D12_CLEAR_VALUE *optimized_clear_value, UINT32 num_castable_formats,
     const DXGI_FORMAT *castable_formats, REFIID iid, void **resource)
 {
     struct d3d12_heap *heap_object = impl_from_ID3D12Heap(heap);
@@ -9328,7 +9353,7 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
             caps->options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_3 &&
             //caps->options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 &&
             //caps->options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
-            caps->options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1 
+            caps->options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1
             /* && caps->options7.SamplerFeedbackTier >= D3D12_SAMPLER_FEEDBACK_TIER_0_9 */)
         caps->max_feature_level = D3D_FEATURE_LEVEL_12_2;
 
