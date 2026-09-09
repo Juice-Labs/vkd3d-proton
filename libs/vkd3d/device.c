@@ -1710,17 +1710,20 @@ static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_d
     if (nv_ssbo_workaround)
         info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
 
-    // HACK: Force this because it doesn't seem to be getting set anymore?
-    info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
-
     /* This limit decides whether root SRV/UAV descriptors become storage buffers or
      * texel buffer views -- see d3d12_device_use_ssbo_root_descriptors, which requires
      * <= 4. On NVIDIA a texel buffer view costs two bindless texture heap slots, and one
      * is created per root descriptor binding per command list, so the difference is
      * thousands of vkCreateBufferView calls. Log the whole decision so an unexpected
-     * call count can be attributed here or ruled out. */
+     * call count can be attributed here or ruled out.
+     *
+     * It also gates the raw SSBO clear path in vkd3d_clear_uav_buffer_is_ssbo_aligned,
+     * so an effective value that does not match what the underlying driver actually
+     * enforces would put SSBO bindings at offsets that driver rejects. Through Boost the
+     * limit is forwarded from the server's device, and driverID with it, so the workaround
+     * should match on NVIDIA -- report both rather than assume it. */
     INFO("minStorageBufferOffsetAlignment: reported %#"PRIx64", effective %#"PRIx64
-         " (driverID %u \"%s\"; NV workaround %s, unconditional override applied). "
+         " (driverID %u \"%s\"; NV workaround %s). "
          "Root SRV/UAV descriptors will use %s.\n",
          reported_ssbo_alignment,
          info->properties2.properties.limits.minStorageBufferOffsetAlignment,

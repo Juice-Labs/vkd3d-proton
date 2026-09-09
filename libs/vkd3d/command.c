@@ -14449,7 +14449,43 @@ static void vkd3d_mask_uint_clear_color(uint32_t color[4], VkFormat vk_format)
 static bool vkd3d_clear_uav_buffer_is_ssbo_aligned(struct d3d12_device *device,
         const struct vkd3d_clear_uav_info *args)
 {
-    return !(args->u.buffer.va & (d3d12_device_get_ssbo_alignment(device) - 1));
+    VkDeviceSize alignment = d3d12_device_get_ssbo_alignment(device);
+    bool aligned = !(args->u.buffer.va & (alignment - 1));
+
+    /* An alignment of 0 or 1 makes the mask degenerate and this test pass for every VA,
+     * which would put SSBO bindings at offsets the driver may not accept. Say so once
+     * rather than silently binding them, since the limit arrives from the server through
+     * Boost and is not necessarily what a local NVIDIA driver would have reported. */
+    if (alignment < 4)
+    {
+        static bool once;
+        if (!once)
+        {
+            once = true;
+            ERR("minStorageBufferOffsetAlignment is %#"PRIx64", which cannot gate the raw "
+                "SSBO clear path; every VA will be treated as aligned.\n", alignment);
+        }
+    }
+
+    /* Counted rather than logged per call: this runs once per buffer UAV clear, which an
+     * application can do thousands of times a frame. The counts are enough to say whether
+     * a clear took the SSBO path or fell back to a VkBufferView, and the first few VAs
+     * give the alignment actually being asked for. */
+    {
+        static unsigned int calls, unaligned;
+        unsigned int n = ++calls;
+
+        if (!aligned)
+            ++unaligned;
+
+        if (n <= 8 || !(n & 0xfff))
+            INFO("clear_uav buffer %u: va %#"PRIx64" alignment %#"PRIx64" -> %s "
+                 "(%u of %u fell back to a buffer view).\n",
+                 n, args->u.buffer.va, alignment, aligned ? "raw SSBO" : "buffer view",
+                 unaligned, n);
+    }
+
+    return aligned;
 }
 
 static bool vkd3d_clear_uav_pack_words(const struct vkd3d_format *uint_format,
