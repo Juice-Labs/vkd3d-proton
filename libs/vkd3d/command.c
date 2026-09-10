@@ -14479,7 +14479,7 @@ static bool vkd3d_clear_uav_buffer_is_ssbo_aligned(struct d3d12_device *device,
             ++unaligned;
 
         if (n <= 8 || !(n & 0xfff))
-            INFO("clear_uav buffer %u: va %#"PRIx64" alignment %#"PRIx64" -> %s "
+            ERR("clear_uav buffer %u: va %#"PRIx64" alignment %#"PRIx64" -> %s "
                  "(%u of %u fell back to a buffer view).\n",
                  n, args->u.buffer.va, alignment, aligned ? "raw SSBO" : "buffer view",
                  unaligned, n);

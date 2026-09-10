@@ -1722,7 +1722,7 @@ static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_d
      * enforces would put SSBO bindings at offsets that driver rejects. Through Boost the
      * limit is forwarded from the server's device, and driverID with it, so the workaround
      * should match on NVIDIA -- report both rather than assume it. */
-    INFO("minStorageBufferOffsetAlignment: reported %#"PRIx64", effective %#"PRIx64
+    ERR("minStorageBufferOffsetAlignment: reported %#"PRIx64", effective %#"PRIx64
          " (driverID %u \"%s\"; NV workaround %s). "
          "Root SRV/UAV descriptors will use %s.\n",
          reported_ssbo_alignment,
