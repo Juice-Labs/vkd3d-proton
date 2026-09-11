@@ -107,12 +107,12 @@ static void vkd3d_descriptor_debug_init_once(void)
 
     if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_DESCRIPTOR_QA_CHECKS)
     {
-        INFO("Enabling descriptor QA checks!\n");
+        ERR("Enabling descriptor QA checks!\n");
         descriptor_debug_active_descriptor_checks = true;
     }
     else if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_INSTRUCTION_QA_CHECKS)
     {
-        INFO("Enabling instruction-level QA checks!\n");
+        ERR("Enabling instruction-level QA checks!\n");
         descriptor_debug_active_instruction_checks = true;
     }
 }
