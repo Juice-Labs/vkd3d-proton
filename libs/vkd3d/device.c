@@ -120,7 +120,24 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS, EXT_dynamic_rendering_unused_attachments),
     VK_EXTENSION(EXT_LINE_RASTERIZATION, EXT_line_rasterization),
     VK_EXTENSION(EXT_IMAGE_COMPRESSION_CONTROL, EXT_image_compression_control),
-    VK_EXTENSION_COND(EXT_DEVICE_FAULT, EXT_device_fault, VKD3D_CONFIG_FLAG_FAULT),
+    /* HACK: unconditional, to settle whether VK_EXT_device_fault is what limits an
+     * NVIDIA command buffer to 65534 vkCmdDispatch.
+     *
+     * Through Boost the answer is yes: the server enables device fault on every
+     * device, and with that forced off all 136 uav-clear cases pass where
+     * test_uav_clear_exhaustive_descriptors and its ported boundary cases faulted
+     * at the 65535th dispatch.  Running the same suite natively with
+     * VKD3D_CONFIG=fault did not reproduce it, but that run proves less than it
+     * looks: vkd3d_check_extensions only says "Found %s extension" at TRACE, so
+     * nothing in the log confirms the flag actually turned the extension on.
+     *
+     * Taking the condition off removes that doubt -- enabled or not enabled is no
+     * longer a question about whether an environment variable was parsed.  Paired
+     * with the extension dump below, a native run now states plainly which vkd3d
+     * is loaded and what it asked for.
+     *
+     * Revert with the dump once the question is answered either way. */
+    VK_EXTENSION(EXT_DEVICE_FAULT, EXT_device_fault),
     VK_EXTENSION(EXT_MEMORY_BUDGET, EXT_memory_budget),
     VK_EXTENSION_COND(EXT_DEVICE_ADDRESS_BINDING_REPORT, EXT_device_address_binding_report, VKD3D_CONFIG_FLAG_FAULT),
     VK_EXTENSION(EXT_DEPTH_BIAS_CONTROL, EXT_depth_bias_control),
@@ -3724,6 +3741,26 @@ static HRESULT vkd3d_create_vk_device(struct d3d12_device *device,
             user_extension_supported, &device->vk_info);
     device_info.ppEnabledExtensionNames = extensions;
     device_info.pEnabledFeatures = &device->device_info.features2.features;
+
+    /* HACK: the enabled device extensions at ERR, so a native run says which
+     * vkd3d is loaded and what it enabled without needing VKD3D_DEBUG=trace.
+     *
+     * d3d12.exe runs from the downloaded test bundle and Windows searches the
+     * executable's own directory for d3d12.dll first, so a native run may not be
+     * exercising this build at all.  If these lines are absent from a native log,
+     * that is the answer: the bundle shipped its own runtime and every native
+     * comparison drawn so far compares two different vkd3d builds.
+     *
+     * Once per device, so the volume is a few dozen lines. */
+    {
+        uint32_t hack_index;
+
+        ERR("HACK device extension count %u
+", device_info.enabledExtensionCount);
+        for (hack_index = 0; hack_index < device_info.enabledExtensionCount; ++hack_index)
+            ERR("HACK device extension %s
+", device_info.ppEnabledExtensionNames[hack_index]);
+    }
     vkd3d_free(user_extension_supported);
 
     vr = VK_CALL(vkCreateDevice(physical_device, &device_info, NULL, &vk_device));
