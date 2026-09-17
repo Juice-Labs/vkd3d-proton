@@ -3755,11 +3755,9 @@ static HRESULT vkd3d_create_vk_device(struct d3d12_device *device,
     {
         uint32_t hack_index;
 
-        ERR("HACK device extension count %u
-", device_info.enabledExtensionCount);
+        ERR("HACK device extension count %u\n", device_info.enabledExtensionCount);
         for (hack_index = 0; hack_index < device_info.enabledExtensionCount; ++hack_index)
-            ERR("HACK device extension %s
-", device_info.ppEnabledExtensionNames[hack_index]);
+            ERR("HACK device extension %s\n", device_info.ppEnabledExtensionNames[hack_index]);
     }
     vkd3d_free(user_extension_supported);
 
